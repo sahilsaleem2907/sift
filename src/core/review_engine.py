@@ -31,12 +31,11 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 logger.warning("Empty review from LLM for %s PR #%s", repo_full, pr_number)
                 return
 
+            comment_id = await github.create_comment(owner, repo, pr_number, review_body)
             try:
-                store_review(repo_full, pr_number, installation_id, review_body)
+                store_review(repo_full, pr_number, installation_id, review_body, comment_id=comment_id)
             except Exception as e:
                 logger.warning("Failed to store review in DB: %s", e)
-
-            await github.create_comment(owner, repo, pr_number, review_body)
             logger.info("Review completed for %s PR #%s", repo_full, pr_number)
     except Exception as e:
         logger.exception("Review failed for %s PR #%s: %s", repo_full, pr_number, e)

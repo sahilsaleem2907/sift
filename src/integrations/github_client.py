@@ -86,8 +86,8 @@ class GitHubClient:
         data = r.json()
         return {"title": data.get("title") or "", "body": data.get("body") or ""}
 
-    async def create_comment(self, owner: str, repo: str, pr_number: int, body: str) -> None:
-        """Post a comment on a PR (issue comment)."""
+    async def create_comment(self, owner: str, repo: str, pr_number: int, body: str) -> int:
+        """Post a comment on a PR (issue comment). Returns the created comment id."""
         if not self._client:
             raise RuntimeError("GitHubClient must be used as async context manager")
         r = await self._client.post(
@@ -95,7 +95,22 @@ class GitHubClient:
             json={"body": body},
         )
         r.raise_for_status()
-        logger.info("Posted comment on %s/%s PR #%s", owner, repo, pr_number)
+        comment_id = r.json()["id"]
+        logger.info("Posted comment on %s/%s PR #%s (id=%s)", owner, repo, pr_number, comment_id)
+        return comment_id
+
+    async def get_comment_reactions(
+        self, owner: str, repo: str, comment_id: int
+    ) -> list:
+        """List reactions on an issue comment. Returns list of dicts with user.login and content."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        r = await self._client.get(
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        r.raise_for_status()
+        return r.json()
 
 
 async def get_installation_token(installation_id: int) -> str:
