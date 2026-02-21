@@ -78,13 +78,76 @@ class GitHubClient:
         return r.text
 
     async def get_pr_details(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
-        """Fetch PR metadata (title, body) for context."""
+        """Fetch PR metadata (title, body, head_sha) for context."""
         if not self._client:
             raise RuntimeError("GitHubClient must be used as async context manager")
         r = await self._client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
         r.raise_for_status()
         data = r.json()
-        return {"title": data.get("title") or "", "body": data.get("body") or ""}
+        head = data.get("head") or {}
+        head_sha = (head.get("sha") or "") if isinstance(head, dict) else ""
+        return {
+            "title": data.get("title") or "",
+            "body": data.get("body") or "",
+            "head_sha": head_sha,
+        }
+
+    async def get_pr_head_commit(self, owner: str, repo: str, pr_number: int) -> str:
+        """Return the PR head commit SHA (for posting review comments)."""
+        details = await self.get_pr_details(owner, repo, pr_number)
+        sha = details.get("head_sha") or ""
+        if not sha:
+            raise ValueError("PR head SHA not found")
+        return sha
+
+    async def create_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        commit_id: str,
+        path: str,
+        line: int,
+        body: str,
+        side: str = "RIGHT",
+    ) -> None:
+        """Post an inline review comment on the PR diff (Files changed tab).
+
+        commit_id: PR head commit SHA. path: file path. line: line in new file. side: RIGHT for new file.
+        """
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        payload = {
+            "commit_id": commit_id,
+            "path": path,
+            "line": line,
+            "side": side,
+            "body": body,
+        }
+        r = await self._client.post(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            json=payload,
+        )
+        if r.status_code == 422:
+            logger.warning(
+                "Review comment rejected (422) for %s/%s PR #%s path=%s line=%s: %s",
+                owner,
+                repo,
+                pr_number,
+                path,
+                line,
+                r.text,
+            )
+            return
+        r.raise_for_status()
+        logger.info(
+            "Posted review comment on %s/%s PR #%s path=%s line=%s",
+            owner,
+            repo,
+            pr_number,
+            path,
+            line,
+        )
 
     async def create_comment(self, owner: str, repo: str, pr_number: int, body: str) -> int:
         """Post a comment on a PR (issue comment). Returns the created comment id."""

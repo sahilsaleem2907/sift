@@ -1,10 +1,43 @@
 """PR diff extraction for review."""
 import logging
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.integrations.github_client import GitHubClient
 
 logger = logging.getLogger(__name__)
+
+# Match "diff --git a/<path> b/<path>" to extract file path (use b-side = new file)
+_DIFF_GIT_RE = re.compile(r"^diff --git a/.+? b/(.+?)\s*$", re.MULTILINE)
+
+
+def split_diff_by_file(diff: str) -> List[Tuple[str, str]]:
+    """Split a full PR diff into per-file chunks.
+
+    Parses unified diff and returns [(path, file_diff), ...] for each file.
+    Path is the repository-relative path (same for a/ and b/ in diff --git).
+    """
+    if not diff or not diff.strip():
+        return []
+
+    parts: List[Tuple[str, str]] = []
+    current_path: Optional[str] = None
+    current_chunk: List[str] = []
+
+    for line in diff.splitlines(keepends=True):
+        m = _DIFF_GIT_RE.match(line)
+        if m:
+            if current_path is not None and current_chunk:
+                parts.append((current_path, "".join(current_chunk)))
+            current_path = m.group(1).strip()
+            current_chunk = [line]
+        elif current_path is not None:
+            current_chunk.append(line)
+
+    if current_path is not None and current_chunk:
+        parts.append((current_path, "".join(current_chunk)))
+
+    return parts
 
 
 async def get_diff_for_review(
