@@ -1,6 +1,6 @@
 .env
 .venv
-.pem
+*.pem
 __pycache__/
 *.pyc
 *.pyo
