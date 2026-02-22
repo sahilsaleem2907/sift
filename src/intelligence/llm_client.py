@@ -13,9 +13,14 @@ SYSTEM_PROMPT = """You are a concise code reviewer. Given a git diff, provide a 
 - A few bullet points on correctness, style, and possible improvements.
 - Be brief and actionable. Do not repeat the diff."""
 
-REVIEW_FILE_SYSTEM = """You are a code reviewer. Given a single file's diff, write your review in plain text or markdown.
+REVIEW_FILE_SYSTEM = """You are a code reviewer. Given a single file's unified diff, write your review in plain text or markdown.
 
-For each issue: mention the line number (the line number in the new/right side of the diff), describe the issue, and when helpful include a suggested fix as a code block so the developer can copy and paste it. Write naturally; no specific format required."""
+CRITICAL - Understanding the diff:
+- Lines starting with "-" are OLD (removed); do NOT cite these line numbers in your review.
+- Lines starting with "+" are NEW (added/changed); these are the only lines you should reference.
+- When you mention a line number, it must be the line number in the NEW file (the right side), i.e. a "+" line. Never cite line numbers from "-" (removed) lines.
+
+For each issue: mention the line number (only from the new "+" side), describe the issue, and when helpful include a suggested fix as a code block. Write naturally; no specific format required."""
 
 SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
 
@@ -56,9 +61,9 @@ def _normalize_comment_body(body: str) -> str:
     if not body or not body.strip():
         return body
     text = body.strip()
-    # If there's a fenced code block but no "Suggested fix" / "Optimal solution" before it, add one
+    # If there's a fenced code block but no "Suggested fix" / "Optimal solution" already in text, add one
     if re.search(r"```", text) and not re.search(
-        r"\*\*(?:Suggested fix|Optimal solution)\*\*", text, re.IGNORECASE
+        r"Suggested fix|Optimal solution", text, re.IGNORECASE
     ):
         text = re.sub(r"(\s*)```", r"\1**Suggested fix:**\n\n```", text, count=1)
     return text
@@ -92,6 +97,20 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _format_semgrep_findings(findings: List[Dict[str, Any]]) -> str:
+    """Format Semgrep findings for inclusion in the LLM prompt."""
+    if not findings:
+        return ""
+    lines = []
+    for f in findings:
+        line = f.get("line", "?")
+        msg = (f.get("message") or "").strip()
+        severity = f.get("severity") or "WARNING"
+        rule_id = f.get("check_id") or ""
+        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity})")
+    return "Semgrep findings for this file (consider in your review):\n" + "\n".join(lines)
+
+
 async def review_file(
     diff_chunk: str,
     path: str,
@@ -101,12 +120,37 @@ async def review_file(
 
     path is for logging; we do not rely on LLM for path. Line is the line number in the new file (right side).
     """
-    user_content = f"File: {path}\n\nDiff:\n{diff_chunk}"
+    user_parts = []
     if pr_context:
+        semgrep_findings = pr_context.get("semgrep_findings") or []
+        semgrep_block = _format_semgrep_findings(semgrep_findings)
+        if semgrep_block:
+            user_parts.append(semgrep_block)
         title = pr_context.get("title") or ""
         body = pr_context.get("body") or ""
         if title or body:
-            user_content = f"PR title: {title}\n\nPR description: {body}\n\n---\n\n{user_content}"
+            user_parts.append(f"PR title: {title}\n\nPR description: {body}")
+    user_parts.append(
+        f"File: {path}\n\n"
+        "Diff (legend: '-' = old/removed, '+' = new/added — cite line numbers only for '+' lines):\n\n"
+        f"{diff_chunk}"
+    )
+    user_content = "\n\n---\n\n".join(user_parts)
+
+    semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
+    logger.debug(
+        "LLM input: file=%s, content_length=%d, semgrep_findings=%d, has_pr_context=%s",
+        path,
+        len(user_content),
+        len(semgrep_findings),
+        bool(pr_context and (pr_context.get("title") or pr_context.get("body"))),
+    )
+    preview_len = 1000
+    if len(user_content) > preview_len:
+        logger.debug("LLM input preview (first %d chars): %s...", preview_len, user_content[:preview_len])
+    else:
+        logger.debug("LLM input (full): %s", user_content)
+
     raw = await _call_ollama(REVIEW_FILE_SYSTEM, user_content)
     return _parse_review_file_response(raw, path)
 

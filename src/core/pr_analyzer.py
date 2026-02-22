@@ -1,7 +1,7 @@
 """PR diff extraction for review."""
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.integrations.github_client import GitHubClient
 
@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 # Match "diff --git a/<path> b/<path>" to extract file path (use b-side = new file)
 _DIFF_GIT_RE = re.compile(r"^diff --git a/.+? b/(.+?)\s*$", re.MULTILINE)
+
+# Match hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 
 
 def split_diff_by_file(diff: str) -> List[Tuple[str, str]]:
@@ -38,6 +41,24 @@ def split_diff_by_file(diff: str) -> List[Tuple[str, str]]:
         parts.append((current_path, "".join(current_chunk)))
 
     return parts
+
+
+def get_diff_line_numbers(file_diff: str) -> Set[int]:
+    """Return set of line numbers in the new (right) side of the diff that appear in hunks.
+
+    Parses @@ -old_start[,old_count] +new_start[,new_count] @@; for each hunk the new-file
+    lines are new_start through new_start + new_count - 1 (new_count defaults to 1 if omitted).
+    Used to filter Semgrep findings and posted comments to diff lines only.
+    """
+    if not file_diff or not file_diff.strip():
+        return set()
+    lines: Set[int] = set()
+    for m in _DIFF_HUNK_RE.finditer(file_diff):
+        new_start = int(m.group(1))
+        new_count = int(m.group(2)) if m.group(2) else 1
+        for i in range(new_start, new_start + new_count):
+            lines.add(i)
+    return lines
 
 
 async def get_diff_for_review(

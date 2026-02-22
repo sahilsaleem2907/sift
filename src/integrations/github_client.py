@@ -1,4 +1,5 @@
 """GitHub API client: App JWT, installation token, PR diff, post comment."""
+import base64
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -99,6 +100,31 @@ class GitHubClient:
         if not sha:
             raise ValueError("PR head SHA not found")
         return sha
+
+    async def get_file_content(
+        self, owner: str, repo: str, path: str, ref: str
+    ) -> Optional[str]:
+        """Fetch file content at ref (e.g. commit SHA). Returns None for 404, binary, or decode errors."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        try:
+            r = await self._client.get(
+                f"/repos/{owner}/{repo}/contents/{path}",
+                params={"ref": ref},
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and data.get("type") == "file" and "content" in data:
+                content_b64 = (data["content"] or "").replace("\n", "").strip()
+                try:
+                    return base64.b64decode(content_b64).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    return None
+            return None
+        except httpx.HTTPError:
+            return None
 
     async def create_review_comment(
         self,

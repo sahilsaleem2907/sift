@@ -2,10 +2,11 @@
 import hashlib
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from src.integrations.github_client import GitHubClient, get_installation_token
-from src.core.pr_analyzer import get_diff_for_review, split_diff_by_file
+from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
+from src.core.semgrep_runner import run_semgrep
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import store_review
 
@@ -62,6 +63,17 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 logger.warning("No file chunks from diff for %s PR #%s", repo_full, pr_number)
                 return
 
+            diff_lines_per_path: Dict[str, Set[int]] = {
+                path: get_diff_line_numbers(fd) for path, fd in file_chunks
+            }
+
+            path_to_content: Dict[str, str] = {}
+            for path, _ in file_chunks:
+                content = await github.get_file_content(owner, repo, path, commit_id)
+                if content is not None:
+                    path_to_content[path] = content
+            findings_by_path: Dict[str, List[dict]] = run_semgrep(path_to_content)
+
             # Group by diff content so we don't run the LLM for the same code block multiple times
             diff_to_paths: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
             for path, file_diff in file_chunks:
@@ -72,8 +84,15 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
             collected: List[Dict[str, Any]] = []
             for _content_key, path_diff_list in diff_to_paths.items():
                 path0, file_diff = path_diff_list[0]
+                diff_lines = diff_lines_per_path.get(path0, set())
+                findings_on_diff = [
+                    f
+                    for f in findings_by_path.get(path0, [])
+                    if f.get("line") in diff_lines
+                ]
+                file_pr_context: Dict[str, Any] = {**(pr_context or {}), "semgrep_findings": findings_on_diff}
                 try:
-                    comments = await review_file(file_diff, path0, pr_context)
+                    comments = await review_file(file_diff, path0, file_pr_context)
                     # One comment per line for this code block (LLM might return duplicate lines)
                     seen_line: set[int] = set()
                     for c in comments:
@@ -90,6 +109,11 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
             # One comment per (path, line); merge multiple into bullet points
             collected = _merge_comments_by_line(collected)
 
+            collected = [
+                c
+                for c in collected
+                if c["line"] in diff_lines_per_path.get(c["path"], set())
+            ]
             summary = await summarize_review(collected) if collected else "No inline comments for this review."
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
