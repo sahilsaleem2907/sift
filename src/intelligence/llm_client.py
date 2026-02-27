@@ -1,4 +1,5 @@
 """Local Ollama integration for code review."""
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -20,7 +21,9 @@ CRITICAL - Understanding the diff:
 - Lines starting with "+" are NEW (added/changed); these are the only lines you should reference.
 - When you mention a line number, it must be the line number in the NEW file (the right side), i.e. a "+" line. Never cite line numbers from "-" (removed) lines.
 
-For each issue: mention the line number (only from the new "+" side), describe the issue, and when helpful include a suggested fix as a code block. Write naturally; no specific format required."""
+FORMAT - So we can attach your comments to the right line, you MUST start each comment with exactly "Line N:" where N is the new-file line number (e.g. "Line 11:"). Then write your issue description and optional suggested fix. Example:
+Line 11: Consider adding a null check here. **Suggested fix:** ...
+"""
 
 SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
 
@@ -49,9 +52,10 @@ async def _call_ollama(system: str, user_content: str) -> str:
     return (msg["content"] or "").strip()
 
 
-# Match line-number references at start of line or after newline: "Line 42:", "line 42", "L42", "#42", "at line 42"
+# Match line-number references so we can parse LLM output. Supports:
+# "Line 42:", "line 42", "L42", "#42", "at line 42", "on line 42", "Line 42 -", "Line 42."
 _LINE_REF_RE = re.compile(
-    r"(?:^|\n)\s*(?:(?:Line|line|L)\s*|#\s*|at\s+line\s+)(\d+)\s*[:\.\-]?\s*",
+    r"(?:^|\n)\s*(?:(?:Line|line|L)\s*|#\s*|(?:at|on)\s+line\s+)(\d+)\s*[:\.\-]?\s*",
     re.IGNORECASE,
 )
 
@@ -111,6 +115,43 @@ def _format_semgrep_findings(findings: List[Dict[str, Any]]) -> str:
     return "Semgrep findings for this file (consider in your review):\n" + "\n".join(lines)
 
 
+def _format_ast_diff(ast_diff: Dict[str, Any]) -> str:
+    """Format diff-aware AST metadata into a compact, LLM-friendly text block.
+
+    The goal is to surface structural context (node types, spans, and texts) for
+    only the changed '+' lines, without overwhelming the model with raw JSON.
+    """
+    out_lines: List[str] = []
+
+    path = ast_diff.get("path", "?")
+    lang = ast_diff.get("lang", "?")
+    out_lines.append(f"File: {path} (language: {lang})")
+
+    changed_ranges = ast_diff.get("changed_ranges") or []
+    if changed_ranges:
+        ranges_str = ", ".join(
+            f"[lines {r.get('start_line')}–{r.get('end_line')}]" for r in changed_ranges
+        )
+        out_lines.append(f"Changed '+' line ranges: {ranges_str}")
+
+    nodes = ast_diff.get("nodes") or []
+    if not nodes:
+        return "\n".join(out_lines)
+
+    out_lines.append("AST nodes on changed '+' lines (one per line below):")
+    for n in nodes:
+        line = n.get("start_line")
+        start_col = n.get("start_col")
+        end_col = n.get("end_col")
+        node_type = n.get("type") or "?"
+        text = (n.get("text") or "").replace("\n", "\\n")
+        out_lines.append(
+            f"- line {line}, cols {start_col}-{end_col}, type={node_type}, text={text!r}"
+        )
+
+    return "\n".join(out_lines)
+
+
 async def review_file(
     diff_chunk: str,
     path: str,
@@ -126,32 +167,58 @@ async def review_file(
         semgrep_block = _format_semgrep_findings(semgrep_findings)
         if semgrep_block:
             user_parts.append(semgrep_block)
+        ast_diff = pr_context.get("ast_diff")
+        if ast_diff:
+            try:
+                user_parts.append(
+                    "Structured AST metadata from tree-sitter for this file, "
+                    "restricted to nodes whose line ranges fall fully within new '+' diff lines.\n"
+                    "Use this as structural context, not as full source code. "
+                    "The following list shows AST nodes on changed lines with their spans and source text:\n"
+                    f"{_format_ast_diff(ast_diff)}"
+                )
+            except TypeError as e:
+                logger.debug("Failed to serialize ast_diff for %s: %s", path, e)
         title = pr_context.get("title") or ""
         body = pr_context.get("body") or ""
         if title or body:
             user_parts.append(f"PR title: {title}\n\nPR description: {body}")
-    user_parts.append(
+
+    diff_intro = (
         f"File: {path}\n\n"
-        "Diff (legend: '-' = old/removed, '+' = new/added — cite line numbers only for '+' lines):\n\n"
-        f"{diff_chunk}"
+        "Diff (legend: '-' = old/removed, '+' = new/added — cite line numbers only for '+' lines)."
     )
+    ast_diff = (pr_context or {}).get("ast_diff")
+    if ast_diff and ast_diff.get("changed_ranges"):
+        line_nums = []
+        for r in ast_diff["changed_ranges"]:
+            s, e = r.get("start_line"), r.get("end_line")
+            if s is not None and e is not None:
+                if s == e:
+                    line_nums.append(str(s))
+                else:
+                    line_nums.append(f"{s}-{e}")
+        if line_nums:
+            diff_intro += (
+                f" The '+' lines in the diff below are at new-file line(s): {', '.join(line_nums)}. "
+                f"Cite these line numbers using the format 'Line N:' (e.g. Line {line_nums[0].split('-')[0]}:) at the start of each comment."
+            )
+    diff_intro += "\n\n"
+    user_parts.append(diff_intro + diff_chunk)
     user_content = "\n\n---\n\n".join(user_parts)
 
     semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
     logger.debug(
-        "LLM input: file=%s, content_length=%d, semgrep_findings=%d, has_pr_context=%s",
+        "LLM input metadata: file=%s, content_length=%d, semgrep_findings=%d, has_pr_context=%s",
         path,
         len(user_content),
         len(semgrep_findings),
         bool(pr_context and (pr_context.get("title") or pr_context.get("body"))),
     )
-    preview_len = 1000
-    if len(user_content) > preview_len:
-        logger.debug("LLM input preview (first %d chars): %s...", preview_len, user_content[:preview_len])
-    else:
-        logger.debug("LLM input (full): %s", user_content)
+    logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
     raw = await _call_ollama(REVIEW_FILE_SYSTEM, user_content)
+    logger.debug("LLM raw output for %s:\n%s", path, raw)
     return _parse_review_file_response(raw, path)
 
 

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Set, Tuple
 from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
 from src.core.semgrep_runner import run_semgrep
+from src.intelligence.ast.diff_ast import build_diff_ast
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import store_review
 
@@ -91,6 +92,15 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     if f.get("line") in diff_lines
                 ]
                 file_pr_context: Dict[str, Any] = {**(pr_context or {}), "semgrep_findings": findings_on_diff}
+
+                source = path_to_content.get(path0)
+                if source is not None:
+                    try:
+                        ast_diff = build_diff_ast(path0, source, file_diff)
+                        if ast_diff is not None:
+                            file_pr_context["ast_diff"] = ast_diff
+                    except Exception as e:
+                        logger.warning("build_diff_ast failed for %s: %s", path0, e)
                 try:
                     comments = await review_file(file_diff, path0, file_pr_context)
                     # One comment per line for this code block (LLM might return duplicate lines)
