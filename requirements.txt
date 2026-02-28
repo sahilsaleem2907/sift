@@ -10,3 +10,4 @@ psycopg2-binary>=2.9.9
 semgrep>=1.0.0
 tree_sitter
 tree_sitter_languages
+pylint>=3.0.0
