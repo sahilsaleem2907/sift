@@ -144,6 +144,7 @@ def store_reaction_event_if_new(
     actor: str,
     reaction_content: str,
     review_id: Optional[int] = None,
+    is_inline_comment: bool = False,
 ) -> bool:
     """Store a reaction feedback event only if not already present. Returns True if stored. Dedup: check-then-insert; on race, unique constraint may raise IntegrityError - we catch and return False."""
     try:
@@ -161,6 +162,7 @@ def store_reaction_event_if_new(
                     review_id=review_id,
                     reaction_content=reaction_content,
                     command=None,
+                    is_inline_comment=is_inline_comment,
                 )
             )
         return True

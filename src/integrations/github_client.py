@@ -188,6 +188,24 @@ class GitHubClient:
         logger.info("Posted comment on %s/%s PR #%s (id=%s)", owner, repo, pr_number, comment_id)
         return comment_id
 
+    async def get_authenticated_user_login(self) -> str:
+        """Return the app's login (e.g. slug[bot]) for filtering our comments. Uses GET /app with JWT because GET /user returns 403 for installation tokens."""
+        jwt_token = _make_jwt()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{GITHUB_API_BASE}/app",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {jwt_token}",
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+        slug = (data.get("slug") or "").strip()
+        if not slug:
+            raise ValueError("GET /app did not return slug")
+        return f"{slug}[bot]"
+
     async def get_comment_reactions(
         self, owner: str, repo: str, comment_id: int
     ) -> list:
@@ -196,6 +214,31 @@ class GitHubClient:
             raise RuntimeError("GitHubClient must be used as async context manager")
         r = await self._client.get(
             f"/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def list_pull_request_review_comments(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list:
+        """List all pull request review comments (inline) on the PR. Returns list of dicts with id, user.login, etc."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        r = await self._client.get(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def get_review_comment_reactions(
+        self, owner: str, repo: str, comment_id: int
+    ) -> list:
+        """List reactions on a pull request review comment (inline). Returns list of dicts with user.login and content."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        r = await self._client.get(
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions",
             headers={"Accept": "application/vnd.github+json"},
         )
         r.raise_for_status()

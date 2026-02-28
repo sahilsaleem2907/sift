@@ -43,32 +43,62 @@ def _normalize_reaction_content(content: str) -> Optional[str]:
 
 
 async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installation_id: int) -> None:
-    """Fetch reactions for the review comment on this PR and store new ones (dedup)."""
+    """Fetch reactions for the summary comment and our inline comments on this PR; store new ones (dedup)."""
     repo_full = f"{owner}/{repo}"
     review_data = get_review_by_repo_pr(repo_full, pr_number)
     if not review_data or review_data[1] is None:
         logger.debug("No review with comment_id for %s PR #%s", repo_full, pr_number)
         return
-    review_id, comment_id = review_data
+    review_id, summary_comment_id = review_data
     try:
         token = await get_installation_token(installation_id)
         async with GitHubClient(installation_id, token=token) as github:
-            reactions = await github.get_comment_reactions(owner, repo, comment_id)
-        for r in reactions:
-            user = r.get("user") or {}
-            actor = user.get("login") or ""
-            content = _normalize_reaction_content((r.get("content") or ""))
-            if not actor or not content:
-                continue
-            stored = store_reaction_event_if_new(
-                repo=repo_full,
-                pr_number=pr_number,
-                comment_id=comment_id,
-                actor=actor,
-                reaction_content=content,
-                review_id=review_id,
-            )
-            if stored:
-                logger.info("Stored reaction %s by %s on %s PR #%s", content, actor, repo_full, pr_number)
+            # Summary comment (Conversation tab)
+            reactions = await github.get_comment_reactions(owner, repo, summary_comment_id)
+            for r in reactions:
+                user = r.get("user") or {}
+                actor = user.get("login") or ""
+                content = _normalize_reaction_content((r.get("content") or ""))
+                if not actor or not content:
+                    continue
+                stored = store_reaction_event_if_new(
+                    repo=repo_full,
+                    pr_number=pr_number,
+                    comment_id=summary_comment_id,
+                    actor=actor,
+                    reaction_content=content,
+                    review_id=review_id,
+                    is_inline_comment=False,
+                )
+                if stored:
+                    logger.info("Stored reaction %s by %s on %s PR #%s (summary)", content, actor, repo_full, pr_number)
+
+            # Inline comments (Files changed): filter to ours by app login
+            app_login = await github.get_authenticated_user_login()
+            all_inline = await github.list_pull_request_review_comments(owner, repo, pr_number)
+            our_inline_ids = [c["id"] for c in all_inline if (c.get("user") or {}).get("login") == app_login]
+            for inline_comment_id in our_inline_ids:
+                try:
+                    inline_reactions = await github.get_review_comment_reactions(owner, repo, inline_comment_id)
+                except Exception as e:
+                    logger.debug("Failed to get reactions for inline comment %s: %s", inline_comment_id, e)
+                    continue
+                for r in inline_reactions:
+                    user = r.get("user") or {}
+                    actor = user.get("login") or ""
+                    content = _normalize_reaction_content((r.get("content") or ""))
+                    if not actor or not content:
+                        continue
+                    stored = store_reaction_event_if_new(
+                        repo=repo_full,
+                        pr_number=pr_number,
+                        comment_id=inline_comment_id,
+                        actor=actor,
+                        reaction_content=content,
+                        review_id=review_id,
+                        is_inline_comment=True,
+                    )
+                    if stored:
+                        logger.info("Stored reaction %s by %s on %s PR #%s (inline)", content, actor, repo_full, pr_number)
     except Exception as e:
         logger.warning("Reaction sync failed for %s PR #%s: %s", repo_full, pr_number, e)

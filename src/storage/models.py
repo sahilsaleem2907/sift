@@ -44,6 +44,7 @@ class FeedbackEvent(Base):
     reaction_content: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     command: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_inline_comment: Mapped[Optional[bool]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
