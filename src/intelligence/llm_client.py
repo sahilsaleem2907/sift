@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from src import config
+from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,26 @@ def _format_ast_diff(ast_diff: Dict[str, Any]) -> str:
 
     return "\n".join(out_lines)
 
+def _format_linter_issues(issues: List[Dict[str, Any]]) -> str:
+    """Format linter issues (with snippets) for inclusion in the LLM prompt. Only lines on the diff."""
+    if not issues:
+        return ""
+    lines = []
+    for i in issues:
+        line = i.get("line", "?")
+        source = i.get("source") or "linter"
+        rule_id = (i.get("rule_id") or "").strip()
+        msg = (i.get("message") or "").strip()
+        snippet = (i.get("snippet") or "").strip()
+        part = f"Line {line} [{source}"
+        if rule_id:
+            part += f" / {rule_id}"
+        part += f"]: {msg}"
+        if snippet:
+            part += f"\n  Code:   {snippet}"
+        lines.append(part)
+    return "Linter issues on changed lines (consider in your review):\n" + "\n".join(lines)
+
 
 async def review_file(
     diff_chunk: str,
@@ -179,6 +200,16 @@ async def review_file(
                 )
             except TypeError as e:
                 logger.debug("Failed to serialize ast_diff for %s: %s", path, e)
+        linter_issues = pr_context.get("linter_issues") or []
+        linter_block = _format_linter_issues(linter_issues)
+        if linter_block:
+            user_parts.append(linter_block)
+            logger.debug(
+                "LLM linter_issues input: file=%s, count=%d, block_preview=%s",
+                path,
+                len(linter_issues),
+                linter_block[:500] + "..." if len(linter_block) > 500 else linter_block,
+            )
         title = pr_context.get("title") or ""
         body = pr_context.get("body") or ""
         if title or body:
@@ -188,16 +219,16 @@ async def review_file(
         f"File: {path}\n\n"
         "Diff (legend: '-' = old/removed, '+' = new/added — cite line numbers only for '+' lines)."
     )
-    ast_diff = (pr_context or {}).get("ast_diff")
-    if ast_diff and ast_diff.get("changed_ranges"):
+    # Use line numbers derived from the diff itself (where '+' lines are in the new file),
+    # so the LLM is told the correct line numbers (e.g. 11 for the changed line, not the hunk start 8).
+    ranges = get_new_file_plus_line_ranges(diff_chunk)
+    if ranges:
         line_nums = []
-        for r in ast_diff["changed_ranges"]:
-            s, e = r.get("start_line"), r.get("end_line")
-            if s is not None and e is not None:
-                if s == e:
-                    line_nums.append(str(s))
-                else:
-                    line_nums.append(f"{s}-{e}")
+        for start, end in ranges:
+            if start == end:
+                line_nums.append(str(start))
+            else:
+                line_nums.append(f"{start}-{end}")
         if line_nums:
             diff_intro += (
                 f" The '+' lines in the diff below are at new-file line(s): {', '.join(line_nums)}. "
@@ -208,11 +239,13 @@ async def review_file(
     user_content = "\n\n---\n\n".join(user_parts)
 
     semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
+    linter_issues = (pr_context or {}).get("linter_issues") or []
     logger.debug(
-        "LLM input metadata: file=%s, content_length=%d, semgrep_findings=%d, has_pr_context=%s",
+        "LLM input: file=%s, content_length=%d, semgrep_findings=%d, linter_issues=%d, has_pr_context=%s",
         path,
         len(user_content),
         len(semgrep_findings),
+        len(linter_issues),
         bool(pr_context and (pr_context.get("title") or pr_context.get("body"))),
     )
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)

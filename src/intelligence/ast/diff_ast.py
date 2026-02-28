@@ -70,6 +70,15 @@ def _compute_new_line_ranges(diff_chunk: str) -> List[Tuple[int, int]]:
     return ranges
 
 
+def get_new_file_plus_line_ranges(diff_chunk: str) -> List[Tuple[int, int]]:
+    """Return (start, end) ranges for new-file line numbers of '+' lines in the diff.
+
+    Used so the LLM payload can cite correct line numbers (e.g. 11 for the changed line,
+    not the hunk start 8). See _compute_new_line_ranges for details.
+    """
+    return _compute_new_line_ranges(diff_chunk)
+
+
 def _node_overlaps_ranges(node: Dict[str, Any], ranges: List[Tuple[int, int]]) -> bool:
     ns = node.get("start_line")
     ne = node.get("end_line")
@@ -139,5 +148,5 @@ def build_diff_ast(path: str, source: str, diff_chunk: str) -> Optional[Dict[str
     }
 
 
-__all__ = ["build_diff_ast"]
+__all__ = ["build_diff_ast", "get_new_file_plus_line_ranges"]
 

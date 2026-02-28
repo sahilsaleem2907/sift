@@ -6,8 +6,9 @@ from typing import Any, Dict, List, Set, Tuple
 
 from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
+from src.core.linter_runner import run_linters
 from src.core.semgrep_runner import run_semgrep
-from src.intelligence.ast.diff_ast import build_diff_ast
+# from src.intelligence.ast.diff_ast import build_diff_ast
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import store_review
 
@@ -74,6 +75,15 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 if content is not None:
                     path_to_content[path] = content
             findings_by_path: Dict[str, List[dict]] = run_semgrep(path_to_content)
+            linter_issues_by_path: Dict[str, List[dict]] = run_linters(path_to_content)
+            total_linter_issues = sum(len(v) for v in linter_issues_by_path.values())
+            if linter_issues_by_path:
+                logger.debug(
+                    "Linters completed: %d path(s) with issues, %d total issues: %s",
+                    len(linter_issues_by_path),
+                    total_linter_issues,
+                    {p: len(issues) for p, issues in linter_issues_by_path.items()},
+                )
 
             # Group by diff content so we don't run the LLM for the same code block multiple times
             diff_to_paths: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
@@ -93,14 +103,43 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 ]
                 file_pr_context: Dict[str, Any] = {**(pr_context or {}), "semgrep_findings": findings_on_diff}
 
-                source = path_to_content.get(path0)
-                if source is not None:
-                    try:
-                        ast_diff = build_diff_ast(path0, source, file_diff)
-                        if ast_diff is not None:
-                            file_pr_context["ast_diff"] = ast_diff
-                    except Exception as e:
-                        logger.warning("build_diff_ast failed for %s: %s", path0, e)
+                # source = path_to_content.get(path0)
+                # if source is not None:
+                #     try:
+                #         ast_diff = build_diff_ast(path0, source, file_diff)
+                #         if ast_diff is not None:
+                #             file_pr_context["ast_diff"] = ast_diff
+                #     except Exception as e:
+                #         logger.warning("build_diff_ast failed for %s: %s", path0, e)
+                raw_linter_count = len(linter_issues_by_path.get(path0, []))
+                linter_on_diff = [
+                    i for i in linter_issues_by_path.get(path0, [])
+                    if i.get("line") in diff_lines
+                ]
+                if raw_linter_count > 0:
+                    logger.debug(
+                        "Linter filter: path=%s, raw_issues=%d, on_diff_lines=%d, diff_line_set_size=%d",
+                        path0,
+                        raw_linter_count,
+                        len(linter_on_diff),
+                        len(diff_lines),
+                    )
+                file_lines = (path_to_content.get(path0) or "").splitlines()
+                linter_issues_with_snippets: List[Dict[str, Any]] = []
+                for i in linter_on_diff:
+                    line_no = i.get("line")
+                    snippet = ""
+                    if line_no is not None and 1 <= line_no <= len(file_lines):
+                        snippet = file_lines[line_no - 1].strip()
+                    linter_issues_with_snippets.append({
+                        **i,
+                        "snippet": snippet,
+                    })
+                file_pr_context: Dict[str, Any] = {
+                    **(pr_context or {}),
+                    "semgrep_findings": findings_on_diff,
+                    "linter_issues": linter_issues_with_snippets,
+                }
                 try:
                     comments = await review_file(file_diff, path0, file_pr_context)
                     # One comment per line for this code block (LLM might return duplicate lines)
