@@ -36,6 +36,10 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     logger.info("DB tables created or already exist")
 
+    if config.VECTOR_DB_ENABLED:
+        from src.storage.vector_store import init_vector_db
+        init_vector_db()
+
 
 @contextmanager
 def session_scope() -> Generator[Session, None, None]:

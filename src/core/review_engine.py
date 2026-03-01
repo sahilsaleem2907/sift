@@ -204,6 +204,13 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     continue
                 diff_to_paths[_diff_content_key(file_diff)].append((path, file_diff))
 
+            _vector_upsert_queue: List[Tuple[list, list]] = []
+            if config.VECTOR_DB_ENABLED:
+                logger.debug(
+                    "[Vector] feature enabled for this review (repo=%s): will extract modified functions, search similar, and upsert chunks",
+                    repo_full,
+                )
+
             collected: List[Dict[str, Any]] = []
             for _content_key, path_diff_list in diff_to_paths.items():
                 path0, file_diff = path_diff_list[0]
@@ -289,6 +296,66 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     "codeql_findings": codeql_on_diff,
                     "linter_issues": linter_issues_with_snippets,
                 }
+
+                if config.VECTOR_DB_ENABLED:
+                    try:
+                        from src.intelligence.ast.function_extract import extract_modified_functions
+                        from src.intelligence.embeddings import get_embeddings
+                        from src.storage.vector_store import search_similar, upsert_chunks
+
+                        logger.debug("[Vector] path=%s: extracting modified functions from diff", path0)
+                        mod_funcs = extract_modified_functions(
+                            path0, path_to_content.get(path0, ""), file_diff
+                        )
+                        if not mod_funcs:
+                            logger.debug("[Vector] path=%s: no modified functions in diff, skipping embed/search", path0)
+                        else:
+                            logger.debug(
+                                "[Vector] path=%s: extracted %d function(s), hashes=%s",
+                                path0, len(mod_funcs), [f.content_hash[:12] + "..." for f in mod_funcs],
+                            )
+                            func_embeddings = await get_embeddings([f.text for f in mod_funcs])
+                            logger.debug("[Vector] path=%s: embedded %d function(s)", path0, len(func_embeddings))
+                            all_matches = []
+                            exclude_hashes = {f.content_hash for f in mod_funcs}
+                            exclude_path = path0 if config.VECTOR_EXCLUDE_SAME_FILE else None
+                            logger.debug(
+                                "[Vector] path=%s: search params exclude_hashes=%d, exclude_path=%s, top_k=%s",
+                                path0, len(exclude_hashes), exclude_path, config.VECTOR_SIMILARITY_TOP_K,
+                            )
+                            for idx, emb in enumerate(func_embeddings):
+                                matches = search_similar(
+                                    repo_full, emb, exclude_hashes, exclude_path,
+                                    config.VECTOR_SIMILARITY_TOP_K,
+                                )
+                                logger.debug(
+                                    "[Vector] path=%s: query %d/%d returned %d similar chunk(s)",
+                                    path0, idx + 1, len(func_embeddings), len(matches),
+                                )
+                                all_matches.extend(matches)
+                            seen_hashes: Dict[str, Any] = {}
+                            for m in all_matches:
+                                if m.content_hash not in seen_hashes or m.score > seen_hashes[m.content_hash].score:
+                                    seen_hashes[m.content_hash] = m
+                            unique_matches = sorted(
+                                seen_hashes.values(), key=lambda m: m.score, reverse=True
+                            )[:config.VECTOR_SIMILARITY_TOP_K]
+                            logger.debug(
+                                "[Vector] path=%s: after dedupe %d unique match(es), top scores=%s",
+                                path0, len(unique_matches),
+                                [round(m.score, 4) for m in unique_matches[:5]] if unique_matches else [],
+                            )
+                            if unique_matches:
+                                file_pr_context["similar_snippets"] = unique_matches
+                                logger.debug(
+                                    "[Vector] path=%s: injected similar_snippets (%d) into LLM context",
+                                    path0, len(unique_matches),
+                                )
+                            _vector_upsert_queue.append((mod_funcs, func_embeddings))
+                            logger.debug("[Vector] path=%s: queued %d chunk(s) for upsert", path0, len(mod_funcs))
+                    except Exception as e:
+                        logger.warning("Vector similarity failed for %s: %s", path0, e)
+
                 try:
                     comments = await review_file(file_diff, path0, file_pr_context)
                     # One comment per line for this code block (LLM might return duplicate lines)
@@ -303,6 +370,27 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                             )
                 except Exception as e:
                     logger.warning("review_file failed for %s: %s", path0, e)
+
+            if config.VECTOR_DB_ENABLED and _vector_upsert_queue:
+                try:
+                    from src.storage.vector_store import upsert_chunks
+                    logger.debug(
+                        "[Vector] repo=%s: starting batch upsert of %d file batch(es), total chunks=%s",
+                        repo_full, len(_vector_upsert_queue),
+                        sum(len(f) for f, _ in _vector_upsert_queue),
+                    )
+                    for batch_idx, (_funcs, _embs) in enumerate(_vector_upsert_queue):
+                        upsert_chunks(repo_full, _funcs, _embs)
+                        logger.debug(
+                            "[Vector] repo=%s: upsert batch %d/%d done (%d chunks)",
+                            repo_full, batch_idx + 1, len(_vector_upsert_queue), len(_funcs),
+                        )
+                    logger.debug(
+                        "[Vector] repo=%s: completed all upserts (%d batch(es))",
+                        repo_full, len(_vector_upsert_queue),
+                    )
+                except Exception as e:
+                    logger.warning("Vector upsert failed for %s: %s", repo_full, e)
 
             # One comment per (path, line); merge multiple into bullet points
             collected = _merge_comments_by_line(collected)

@@ -38,6 +38,14 @@ else:
 _SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "0").strip().lower()
 SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
 
+# Vector DB / code similarity (optional; default disabled)
+_VECTOR_DB_ENABLED_RAW = (os.environ.get("VECTOR_DB_ENABLED") or "0").strip().lower()
+VECTOR_DB_ENABLED = _VECTOR_DB_ENABLED_RAW in ("1", "true", "yes")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+VECTOR_SIMILARITY_TOP_K = int(os.environ.get("VECTOR_SIMILARITY_TOP_K") or "5")
+_VECTOR_EXCLUDE_SAME_FILE_RAW = (os.environ.get("VECTOR_EXCLUDE_SAME_FILE") or "1").strip().lower()
+VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""

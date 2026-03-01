@@ -187,6 +187,26 @@ def _format_codeql_findings(findings: List[Dict[str, Any]]) -> str:
     return "CodeQL findings for this file (consider in your review):\n" + "\n".join(lines)
 
 
+def _format_similar_snippets(matches: List[Any]) -> str:
+    """Format vector-similarity matches into an LLM-friendly context block."""
+    if not matches:
+        return ""
+    _MAX_SNIPPET_LINES = 30
+    lines: List[str] = [
+        "Similar code elsewhere in this repo (consider for duplication, consistency, or repeated mistakes):"
+    ]
+    for m in matches:
+        header = f"- {m.path} (lines {m.start_line}-{m.end_line})"
+        if m.func_name:
+            header += f", function `{m.func_name}`"
+        snippet = m.chunk_text
+        snippet_lines = snippet.splitlines()
+        if len(snippet_lines) > _MAX_SNIPPET_LINES:
+            snippet = "\n".join(snippet_lines[:_MAX_SNIPPET_LINES]) + "\n... (truncated)"
+        lines.append(f"{header}\n```\n{snippet}\n```")
+    return "\n".join(lines)
+
+
 async def review_file(
     diff_chunk: str,
     path: str,
@@ -254,6 +274,17 @@ async def review_file(
             )
     diff_intro += "\n\n"
     user_parts.append(diff_intro + diff_chunk)
+
+    similar_snippets = (pr_context or {}).get("similar_snippets")
+    if similar_snippets:
+        sim_block = _format_similar_snippets(similar_snippets)
+        if sim_block:
+            user_parts.append(sim_block)
+            logger.debug(
+                "[Vector] path=%s: appended similar_snippets block to prompt (%d match(es), %d chars)",
+                path, len(similar_snippets), len(sim_block),
+            )
+
     user_content = "\n\n---\n\n".join(user_parts)
 
     semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
