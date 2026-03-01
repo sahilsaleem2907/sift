@@ -34,6 +34,10 @@ if _sift_clones:
 else:
     SIFT_CLONE_CACHE_DIR = Path.home() / ".sift" / "clones"
 
+# Smart analysis routing (optional; default disabled)
+_SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "0").strip().lower()
+SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""

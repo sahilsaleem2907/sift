@@ -11,6 +11,13 @@ from src.core.linter_runner import run_linters
 from src.core.semgrep_runner import run_semgrep
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
+from src.core.analysis_routing import (
+    FileType,
+    classify_file_type,
+    get_tools_for_file,
+    risk_level,
+    score_risk_with_breakdown,
+)
 # from src.intelligence.ast.diff_ast import build_diff_ast
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import store_review
@@ -77,10 +84,90 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 content = await github.get_file_content(owner, repo, path, commit_id)
                 if content is not None:
                     path_to_content[path] = content
-            findings_by_path: Dict[str, List[dict]] = run_semgrep(path_to_content)
-            linter_issues_by_path: Dict[str, List[dict]] = run_linters(path_to_content)
+
+            # Smart routing: classify and score each path; build tool path sets
+            path_to_file_type: Dict[str, FileType] = {}
+            path_to_risk: Dict[str, Any] = {}  # RiskLevel
+            linter_paths: Set[str] = set()
+            semgrep_paths: Set[str] = set()
+            codeql_paths: Set[str] = set()
+
+            if config.SIFT_SMART_ROUTING_ENABLED:
+                pr_paths = [p for p, _ in file_chunks]
+                logger.debug(
+                    "[Smart routing] Classifying %d file(s) and computing risk/tools",
+                    len(pr_paths),
+                )
+                for path in pr_paths:
+                    ft = classify_file_type(path)
+                    content = path_to_content.get(path) or ""
+                    sc, breakdown = score_risk_with_breakdown(path, content, ft)
+                    rl = risk_level(sc)
+                    path_to_file_type[path] = ft
+                    path_to_risk[path] = rl
+                    tools_set = get_tools_for_file(ft, rl)
+                    if "linter" in tools_set:
+                        linter_paths.add(path)
+                    if "semgrep" in tools_set:
+                        semgrep_paths.add(path)
+                    if "codeql" in tools_set:
+                        codeql_paths.add(path)
+                    tools_str = ",".join(sorted(tools_set)) if tools_set else "SKIP"
+                    # Log why this risk level: which factors contributed
+                    parts = [f"{k}+{v}" for k, v in breakdown.items() if v > 0]
+                    reason = " ".join(parts) if parts else "no factors"
+                    logger.debug(
+                        "[Smart routing] %s → type=%s score=%s level=%s → tools=[%s]",
+                        path, ft.value, sc, rl.value, tools_str,
+                    )
+                    logger.debug(
+                        "[Smart routing]   risk reason: %s (total=%s)",
+                        reason, sc,
+                    )
+                skip_count = sum(
+                    1 for p in pr_paths
+                    if path_to_file_type.get(p) in (FileType.DOCUMENTATION, FileType.ASSETS)
+                )
+                logger.debug(
+                    "[Smart routing] Summary: linter=%d paths, semgrep=%d paths, codeql=%d paths, skip(docs/assets)=%d",
+                    len(linter_paths),
+                    len(semgrep_paths),
+                    len(codeql_paths),
+                    skip_count,
+                )
+
+            if config.SIFT_SMART_ROUTING_ENABLED:
+                linter_input = {p: path_to_content[p] for p in linter_paths if p in path_to_content}
+                semgrep_input = {p: path_to_content[p] for p in semgrep_paths if p in path_to_content}
+                logger.debug(
+                    "[Smart routing] Running linter on %d path(s): %s",
+                    len(linter_input), sorted(linter_input.keys()) if linter_input else [],
+                )
+                logger.debug(
+                    "[Smart routing] Running Semgrep on %d path(s): %s",
+                    len(semgrep_input), sorted(semgrep_input.keys()) if semgrep_input else [],
+                )
+                findings_by_path = run_semgrep(semgrep_input)
+                linter_issues_by_path = run_linters(linter_input)
+            else:
+                findings_by_path = run_semgrep(path_to_content)
+                linter_issues_by_path = run_linters(path_to_content)
+
             codeql_findings_by_path: Dict[str, List[dict]] = {}
-            if config.CODEQL_ENABLED:
+            run_codeql_this_pr = config.CODEQL_ENABLED and (
+                not config.SIFT_SMART_ROUTING_ENABLED or len(codeql_paths) > 0
+            )
+            if config.SIFT_SMART_ROUTING_ENABLED and config.CODEQL_ENABLED:
+                if codeql_paths:
+                    logger.debug(
+                        "[Smart routing] Running CodeQL (CRITICAL code paths): %s",
+                        sorted(codeql_paths),
+                    )
+                else:
+                    logger.debug(
+                        "[Smart routing] Skipping CodeQL (no CRITICAL code files in this PR)",
+                    )
+            if run_codeql_this_pr:
                 try:
                     source_root = get_repo_at_commit(owner, repo, commit_id, token)
                     codeql_langs = languages_from_paths([p for p, _ in file_chunks])
@@ -120,17 +207,43 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
             collected: List[Dict[str, Any]] = []
             for _content_key, path_diff_list in diff_to_paths.items():
                 path0, file_diff = path_diff_list[0]
+
+                # Skip docs/assets when smart routing is enabled
+                if config.SIFT_SMART_ROUTING_ENABLED:
+                    ft0 = path_to_file_type.get(path0)
+                    if ft0 in (FileType.DOCUMENTATION, FileType.ASSETS):
+                        logger.debug(
+                            "[Smart routing] Skipping LLM review (docs/assets): %s",
+                            path0,
+                        )
+                        continue
+
                 diff_lines = diff_lines_per_path.get(path0, set())
-                findings_on_diff = [
-                    f
-                    for f in findings_by_path.get(path0, [])
-                    if f.get("line") in diff_lines
-                ]
-                codeql_on_diff = [
-                    f
-                    for f in codeql_findings_by_path.get(path0, [])
-                    if f.get("line") in diff_lines
-                ]
+                # Only attach semgrep/codeql findings when this path was in the tool set
+                if config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths:
+                    findings_on_diff = []
+                else:
+                    findings_on_diff = [
+                        f
+                        for f in findings_by_path.get(path0, [])
+                        if f.get("line") in diff_lines
+                    ]
+                if config.SIFT_SMART_ROUTING_ENABLED and path0 not in codeql_paths:
+                    codeql_on_diff = []
+                else:
+                    codeql_on_diff = [
+                        f
+                        for f in codeql_findings_by_path.get(path0, [])
+                        if f.get("line") in diff_lines
+                    ]
+                if config.SIFT_SMART_ROUTING_ENABLED:
+                    logger.debug(
+                        "[Smart routing] LLM context for %s: linter=%s semgrep=%s codeql=%s (on-diff lines)",
+                        path0,
+                        "yes" if path0 in linter_paths else "no",
+                        len(findings_on_diff),
+                        len(codeql_on_diff),
+                    )
                 file_pr_context: Dict[str, Any] = {
                     **(pr_context or {}),
                     "semgrep_findings": findings_on_diff,
@@ -145,9 +258,10 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                 #             file_pr_context["ast_diff"] = ast_diff
                 #     except Exception as e:
                 #         logger.warning("build_diff_ast failed for %s: %s", path0, e)
-                raw_linter_count = len(linter_issues_by_path.get(path0, []))
+                raw_linter_list = linter_issues_by_path.get(path0, []) if (not config.SIFT_SMART_ROUTING_ENABLED or path0 in linter_paths) else []
+                raw_linter_count = len(raw_linter_list)
                 linter_on_diff = [
-                    i for i in linter_issues_by_path.get(path0, [])
+                    i for i in raw_linter_list
                     if i.get("line") in diff_lines
                 ]
                 if raw_linter_count > 0:
