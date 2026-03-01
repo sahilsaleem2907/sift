@@ -4,10 +4,13 @@ import logging
 from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
+from src import config
 from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
 from src.core.linter_runner import run_linters
 from src.core.semgrep_runner import run_semgrep
+from src.core.repo_cache import get_repo_at_commit
+from src.core.codeql_runner import run_codeql, languages_from_paths
 # from src.intelligence.ast.diff_ast import build_diff_ast
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import store_review
@@ -76,6 +79,28 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     path_to_content[path] = content
             findings_by_path: Dict[str, List[dict]] = run_semgrep(path_to_content)
             linter_issues_by_path: Dict[str, List[dict]] = run_linters(path_to_content)
+            codeql_findings_by_path: Dict[str, List[dict]] = {}
+            if config.CODEQL_ENABLED:
+                try:
+                    source_root = get_repo_at_commit(owner, repo, commit_id, token)
+                    codeql_langs = languages_from_paths([p for p, _ in file_chunks])
+                    codeql_findings_by_path = run_codeql(
+                        source_root,
+                        config.CODEQL_SUITE,
+                        codeql_langs,
+                        config.CODEQL_TIMEOUT,
+                    )
+                    if codeql_findings_by_path:
+                        total_codeql = sum(len(v) for v in codeql_findings_by_path.values())
+                        logger.debug(
+                            "CodeQL (entire repo): %d path(s), %d total findings: %s",
+                            len(codeql_findings_by_path),
+                            total_codeql,
+                            {p: len(findings) for p, findings in codeql_findings_by_path.items()},
+                        )
+                        logger.debug("CodeQL findings for entire repo: %s", codeql_findings_by_path)
+                except Exception as e:
+                    logger.warning("CodeQL skipped: %s", e)
             total_linter_issues = sum(len(v) for v in linter_issues_by_path.values())
             if linter_issues_by_path:
                 logger.debug(
@@ -101,7 +126,16 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     for f in findings_by_path.get(path0, [])
                     if f.get("line") in diff_lines
                 ]
-                file_pr_context: Dict[str, Any] = {**(pr_context or {}), "semgrep_findings": findings_on_diff}
+                codeql_on_diff = [
+                    f
+                    for f in codeql_findings_by_path.get(path0, [])
+                    if f.get("line") in diff_lines
+                ]
+                file_pr_context: Dict[str, Any] = {
+                    **(pr_context or {}),
+                    "semgrep_findings": findings_on_diff,
+                    "codeql_findings": codeql_on_diff,
+                }
 
                 # source = path_to_content.get(path0)
                 # if source is not None:
@@ -135,9 +169,10 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                         **i,
                         "snippet": snippet,
                     })
-                file_pr_context: Dict[str, Any] = {
+                file_pr_context = {
                     **(pr_context or {}),
                     "semgrep_findings": findings_on_diff,
+                    "codeql_findings": codeql_on_diff,
                     "linter_issues": linter_issues_with_snippets,
                 }
                 try:

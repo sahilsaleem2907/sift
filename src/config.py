@@ -20,6 +20,20 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+# CodeQL (optional; default disabled)
+_CODEQL_ENABLED_RAW = (os.environ.get("CODEQL_ENABLED") or "0").strip().lower()
+CODEQL_ENABLED = _CODEQL_ENABLED_RAW in ("1", "true", "yes")
+CODEQL_SUITE_RAW = (os.environ.get("CODEQL_SUITE") or "default").strip().lower()
+_VALID_SUITES = ("default", "security-extended", "security-and-quality")
+CODEQL_SUITE = CODEQL_SUITE_RAW if CODEQL_SUITE_RAW in _VALID_SUITES else "default"
+CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
+# Base directory for cached git clones (default: ~/.sift/clones or temp)
+_sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
+if _sift_clones:
+    SIFT_CLONE_CACHE_DIR = Path(_sift_clones).expanduser().resolve()
+else:
+    SIFT_CLONE_CACHE_DIR = Path.home() / ".sift" / "clones"
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""

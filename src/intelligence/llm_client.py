@@ -173,6 +173,20 @@ def _format_linter_issues(issues: List[Dict[str, Any]]) -> str:
     return "Linter issues on changed lines (consider in your review):\n" + "\n".join(lines)
 
 
+def _format_codeql_findings(findings: List[Dict[str, Any]]) -> str:
+    """Format CodeQL findings for inclusion in the LLM prompt (same shape as Semgrep)."""
+    if not findings:
+        return ""
+    lines = []
+    for f in findings:
+        line = f.get("line", "?")
+        msg = (f.get("message") or "").strip()
+        severity = f.get("severity") or "WARNING"
+        rule_id = f.get("check_id") or ""
+        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity})")
+    return "CodeQL findings for this file (consider in your review):\n" + "\n".join(lines)
+
+
 async def review_file(
     diff_chunk: str,
     path: str,
@@ -188,6 +202,10 @@ async def review_file(
         semgrep_block = _format_semgrep_findings(semgrep_findings)
         if semgrep_block:
             user_parts.append(semgrep_block)
+        codeql_findings = pr_context.get("codeql_findings") or []
+        codeql_block = _format_codeql_findings(codeql_findings)
+        if codeql_block:
+            user_parts.append(codeql_block)
         ast_diff = pr_context.get("ast_diff")
         if ast_diff:
             try:
@@ -240,14 +258,18 @@ async def review_file(
 
     semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
     linter_issues = (pr_context or {}).get("linter_issues") or []
+    codeql_findings = (pr_context or {}).get("codeql_findings") or []
     logger.debug(
-        "LLM input: file=%s, content_length=%d, semgrep_findings=%d, linter_issues=%d, has_pr_context=%s",
+        "LLM input: file=%s, content_length=%d, semgrep_findings=%d, linter_issues=%d, codeql_findings=%d, has_pr_context=%s",
         path,
         len(user_content),
         len(semgrep_findings),
         len(linter_issues),
+        len(codeql_findings),
         bool(pr_context and (pr_context.get("title") or pr_context.get("body"))),
     )
+    if codeql_findings:
+        logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
     raw = await _call_ollama(REVIEW_FILE_SYSTEM, user_content)
