@@ -22,8 +22,21 @@ CRITICAL - Understanding the diff:
 - Lines starting with "+" are NEW (added/changed); these are the only lines you should reference.
 - When you mention a line number, it must be the line number in the NEW file (the right side), i.e. a "+" line. Never cite line numbers from "-" (removed) lines.
 
-FORMAT - So we can attach your comments to the right line, you MUST start each comment with exactly "Line N:" where N is the new-file line number (e.g. "Line 11:"). Then write your issue description and optional suggested fix. Example:
-Line 11: Consider adding a null check here. **Suggested fix:** ...
+FORMAT - So we can attach your comments to the right line, you MUST start each comment with exactly "Line N:" where N is the new-file line number (e.g. "Line 11:"). Then write your issue description and optional suggested fix.
+
+SUGGESTED FIX - When you suggest a fix, you MUST include a fenced code block:
+- Use a code block with the file's language tag (e.g. ```python, ```js, ```go). The block must contain ONLY the corrected code that the developer can copy and paste.
+- Do NOT put diff markers (+, -, @@) or line numbers inside the code block. Do NOT show "before/after" or context lines—only the fix code.
+- The code must be directly copy-pasteable as a replacement.
+
+Example:
+Line 11: The variable `x` is used before being defined. **Suggested fix:**
+
+```python
+x = get_default_value()
+if x is not None:
+    process(x)
+```
 """
 
 SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
@@ -61,11 +74,38 @@ _LINE_REF_RE = re.compile(
 )
 
 
+def _strip_diff_markers_from_code_block(content: str) -> str:
+    """Strip diff markers (+, -, @@) from code block content so it is copy-pasteable."""
+    lines = content.split("\n")
+    out = []
+    for line in lines:
+        # Remove @@ hunk headers (e.g. @@ -1,3 +1,4 @@)
+        if re.match(r"^\s*@@\s.*\s@@\s*$", line) or re.match(r"^\s*@@\s", line):
+            continue
+        # Strip leading "+ " or "- " (diff added/removed line markers)
+        if line.startswith("+ "):
+            line = line[2:]
+        elif line.startswith("- "):
+            line = line[2:]
+        elif line.startswith("+") and len(line) > 1 and line[1] != "+":
+            line = line[1:]
+        elif line.startswith("-") and len(line) > 1 and line[1] != "-":
+            line = line[1:]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _normalize_comment_body(body: str) -> str:
-    """Ensure body has **Suggested fix:** before code blocks and consistent formatting."""
+    """Ensure body has **Suggested fix:** before code blocks, consistent formatting, and clean copy-pasteable code (no diff markers)."""
     if not body or not body.strip():
         return body
     text = body.strip()
+    # Strip diff markers from inside fenced code blocks (safety net if LLM emitted diff syntax)
+    def replace_code_block(m: re.Match) -> str:
+        fence = m.group(1)  # opening ``` optionally with lang
+        inner = m.group(2)  # content
+        return fence + "\n" + _strip_diff_markers_from_code_block(inner) + "\n```"
+    text = re.sub(r"(```[\w]*)\n(.*?)```", replace_code_block, text, flags=re.DOTALL)
     # If there's a fenced code block but no "Suggested fix" / "Optimal solution" already in text, add one
     if re.search(r"```", text) and not re.search(
         r"Suggested fix|Optimal solution", text, re.IGNORECASE
