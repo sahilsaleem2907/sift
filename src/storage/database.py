@@ -3,12 +3,12 @@ import logging
 from contextlib import contextmanager
 from typing import Generator, List, Optional
 
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, or_, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from src import config
-from src.storage.models import Base, FeedbackEvent, Review
+from src.storage.models import Base, FeedbackEvent, Review, ReviewFile
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,12 @@ def _get_engine():
 def _get_session_factory():
     global _SessionLocal
     if _SessionLocal is None:
-        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_get_engine())
+        _SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=_get_engine(),
+            expire_on_commit=False,
+        )
     return _SessionLocal
 
 
@@ -62,21 +67,29 @@ def store_review(
     installation_id: int,
     review_body: str,
     comment_id: Optional[int] = None,
-) -> None:
-    """Insert a review row. Truncate body if needed. Option A: call after posting comment so comment_id is set."""
+    paths: Optional[List[str]] = None,
+) -> Optional[int]:
+    """Insert a review row. Truncate body if needed. Optionally store paths for feedback loop.
+    Returns review_id if paths were provided (needed for store_review_files), else None."""
     max_body = 65535
     body = review_body if len(review_body) <= max_body else review_body[: max_body - 3] + "..."
+    review_id = None
     with session_scope() as session:
-        session.add(
-            Review(
-                repo=repo,
-                pr_number=pr_number,
-                installation_id=installation_id,
-                review_body=body,
-                comment_id=comment_id,
-            )
+        review = Review(
+            repo=repo,
+            pr_number=pr_number,
+            installation_id=installation_id,
+            review_body=body,
+            comment_id=comment_id,
         )
+        session.add(review)
+        session.flush()  # get review.id
+        review_id = review.id
+        if paths:
+            for p in paths[:500]:  # cap to avoid huge inserts
+                session.add(ReviewFile(review_id=review_id, path=p))
     logger.info("Stored review for %s PR #%s", repo, pr_number)
+    return review_id
 
 
 def store_pr_closed_event(repo: str, pr_number: int, merged: bool) -> None:
@@ -190,6 +203,41 @@ def get_feedback_events_for_pr(repo: str, pr_number: int) -> List[FeedbackEvent]
             .order_by(FeedbackEvent.created_at)
         )
         return list(session.execute(stmt).scalars().all())
+
+
+def get_review_ids_for_path_pattern(repo: str, path_prefix: str) -> List[int]:
+    """Return distinct review_ids for reviews that touched files under path_prefix.
+    path_prefix is a directory prefix, e.g. 'src/auth' matches 'src/auth/login.py'."""
+    if not path_prefix:
+        return []
+    prefix_slash = path_prefix.rstrip("/") + "/"
+    with session_scope() as session:
+        stmt = (
+            select(ReviewFile.review_id)
+            .join(Review, ReviewFile.review_id == Review.id)
+            .where(Review.repo == repo)
+            .where(
+                or_(
+                    ReviewFile.path == path_prefix.rstrip("/"),
+                    ReviewFile.path.like(prefix_slash + "%"),
+                )
+            )
+            .distinct()
+        )
+        rows = session.execute(stmt).scalars().all()
+        return list(rows)
+
+
+def get_avg_quality_score_for_path_pattern(repo: str, path_prefix: str) -> Optional[float]:
+    """Average quality score (0-100) for past reviews that touched files under path_prefix.
+    Returns None if no such reviews exist."""
+    review_ids = get_review_ids_for_path_pattern(repo, path_prefix)
+    if not review_ids:
+        return None
+    from src.feedback.scorer import compute_quality_score
+
+    scores = [compute_quality_score(rid) for rid in review_ids]
+    return sum(scores) / len(scores)
 
 
 def get_review_by_repo_pr(repo: str, pr_number: int) -> Optional[tuple[int, Optional[int]]]:

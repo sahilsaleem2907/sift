@@ -2,7 +2,7 @@
 import hashlib
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src import config
 from src.integrations.github_client import GitHubClient, get_installation_token
@@ -16,13 +16,32 @@ from src.core.analysis_routing import (
     classify_file_type,
     get_tools_for_file,
     risk_level,
-    score_risk_with_breakdown,
+    score_risk_combined,
 )
 # from src.intelligence.ast.diff_ast import build_diff_ast
+from src.intelligence.ast.function_extract import extract_modified_functions
 from src.intelligence.llm_client import review_file, summarize_review
-from src.storage.database import store_review
+from src.storage.database import get_avg_quality_score_for_path_pattern, store_review
 
 logger = logging.getLogger(__name__)
+
+
+# Security-sensitive function name substrings for AST-based risk boost
+_AST_FUNCTION_RISK_KEYWORDS = frozenset({
+    "auth", "verify", "validate", "encrypt", "decrypt", "login",
+    "check_permission", "sanitize", "hash",
+})
+_AST_FUNCTION_BOOST = 15
+
+
+def _has_security_sensitive_function(mod_funcs: list) -> bool:
+    """True if any modified function name contains security-sensitive keywords."""
+    for chunk in mod_funcs:
+        name = (chunk.name or "").lower()
+        for kw in _AST_FUNCTION_RISK_KEYWORDS:
+            if kw in name:
+                return True
+    return False
 
 
 def _diff_content_key(file_diff: str) -> str:
@@ -98,14 +117,43 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     "[Smart routing] Classifying %d file(s) and computing risk/tools",
                     len(pr_paths),
                 )
+                # Build feedback cache: path_prefix -> avg quality (one query per unique dir)
+                path_prefix_to_quality: Dict[str, Optional[float]] = {}
                 for path in pr_paths:
+                    parts = path.replace("\\", "/").split("/")
+                    prefix = "/".join(parts[:-1]) if len(parts) > 1 else ""
+                    if prefix and prefix not in path_prefix_to_quality:
+                        path_prefix_to_quality[prefix] = get_avg_quality_score_for_path_pattern(
+                            repo_full, prefix
+                        )
+                for path, file_diff in file_chunks:
                     ft = classify_file_type(path)
                     content = path_to_content.get(path) or ""
-                    sc, breakdown = score_risk_with_breakdown(path, content, ft)
+                    sc, breakdown = score_risk_combined(path, content, ft, file_diff)
+                    # Feedback loop: historical quality for this path's directory
+                    parts = path.replace("\\", "/").split("/")
+                    path_prefix = "/".join(parts[:-1]) if len(parts) > 1 else ""
+                    avg_quality = path_prefix_to_quality.get(path_prefix) if path_prefix else None
+                    if avg_quality is not None:
+                        if avg_quality < 35:
+                            sc += 10
+                            breakdown["feedback"] = 10
+                        elif avg_quality > 75:
+                            sc -= 5
+                            breakdown["feedback"] = -5
+                    # AST-based boost: security-sensitive function names
+                    if ft == FileType.CODE:
+                        try:
+                            mod_funcs = extract_modified_functions(path, content, file_diff)
+                            if mod_funcs and _has_security_sensitive_function(mod_funcs):
+                                sc += _AST_FUNCTION_BOOST
+                                breakdown["ast_function"] = _AST_FUNCTION_BOOST
+                        except Exception as e:
+                            logger.debug("AST function extract failed for %s: %s", path, e)
                     rl = risk_level(sc)
                     path_to_file_type[path] = ft
                     path_to_risk[path] = rl
-                    tools_set = get_tools_for_file(ft, rl)
+                    tools_set = get_tools_for_file(ft, rl, path)
                     if "linter" in tools_set:
                         linter_paths.add(path)
                     if "semgrep" in tools_set:
@@ -299,7 +347,6 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
 
                 if config.VECTOR_DB_ENABLED:
                     try:
-                        from src.intelligence.ast.function_extract import extract_modified_functions
                         from src.intelligence.embeddings import get_embeddings
                         from src.storage.vector_store import search_similar, upsert_chunks
 
@@ -434,6 +481,7 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     installation_id,
                     summary,
                     comment_id=comment_id,
+                    paths=[p for p, _ in file_chunks],
                 )
             except Exception as e:
                 logger.warning("Failed to store review in DB: %s", e)

@@ -27,6 +27,16 @@ class Review(Base):
     )
 
 
+class ReviewFile(Base):
+    """Paths touched by a review (for feedback loop / path-pattern quality lookup)."""
+
+    __tablename__ = "review_files"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    review_id: Mapped[int] = mapped_column(Integer, ForeignKey("reviews.id"), nullable=False, index=True)
+    path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+
+
 class FeedbackEvent(Base):
     """Single feedback event (reaction or /feedback command)."""
 

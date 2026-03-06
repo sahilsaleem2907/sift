@@ -8,6 +8,8 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from src import config
+
 from src.intelligence.ast.function_extract import FunctionChunk
 from src.storage.models import Base
 
@@ -31,7 +33,7 @@ class CodeChunk(Base):
     start_line: Mapped[int] = mapped_column(Integer, nullable=False)
     end_line: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding = mapped_column(Vector(), nullable=False)
+    embedding = mapped_column(Vector(config.EMBEDDING_DIMENSION), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -68,6 +70,7 @@ def init_vector_db() -> None:
 
     Safe to call multiple times (IF NOT EXISTS).
     Must be called *after* the engine is available (i.e. after init_db or as part of it).
+    If the embedding column exists without dimensions (legacy schema), drops and recreates the table.
     """
     from src.storage.database import _get_engine
 
@@ -79,12 +82,32 @@ def init_vector_db() -> None:
 
     Base.metadata.create_all(bind=engine, tables=[CodeChunk.__table__])
 
-    with engine.connect() as conn:
+    def _create_hnsw_index(conn):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_code_chunks_embedding_hnsw "
             "ON code_chunks USING hnsw (embedding vector_cosine_ops)"
         ))
         conn.commit()
+
+    try:
+        with engine.connect() as conn:
+            _create_hnsw_index(conn)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "column does not have dimensions" in err_msg or "dimensions" in err_msg:
+            logger.warning(
+                "[Vector] code_chunks.embedding has no dimensions (legacy schema). "
+                "Dropping and recreating table with vector(%d).",
+                config.EMBEDDING_DIMENSION,
+            )
+            with engine.connect() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS code_chunks CASCADE"))
+                conn.commit()
+            Base.metadata.create_all(bind=engine, tables=[CodeChunk.__table__])
+            with engine.connect() as conn:
+                _create_hnsw_index(conn)
+        else:
+            raise
 
     logger.info("Vector DB initialized (code_chunks table + HNSW index)")
 
