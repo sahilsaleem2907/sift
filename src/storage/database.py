@@ -1,14 +1,17 @@
 """Database connection and session handling."""
+import json
 import logging
 from contextlib import contextmanager
-from typing import Generator, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Generator, List, Optional
 
 from sqlalchemy import create_engine, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from src import config
-from src.storage.models import Base, FeedbackEvent, Review, ReviewFile
+from src.storage.models import Base, FeedbackEvent, Review, ReviewFile, ToolResultCache
 
 logger = logging.getLogger(__name__)
 
@@ -254,3 +257,51 @@ def get_review_by_repo_pr(repo: str, pr_number: int) -> Optional[tuple[int, Opti
         if row is None:
             return None
         return (row[0], row[1])
+
+
+def get_tool_cache_hits(keys: List[str], ttl_hours: int) -> Dict[str, List[Any]]:
+    """Batch lookup: return {cache_key: findings} for non-expired keys. findings are parsed from JSON."""
+    if not keys:
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+    with session_scope() as session:
+        stmt = (
+            select(ToolResultCache.cache_key, ToolResultCache.findings_json)
+            .where(ToolResultCache.cache_key.in_(keys))
+            .where(ToolResultCache.created_at >= cutoff)
+        )
+        rows = session.execute(stmt).all()
+    out: Dict[str, List[Any]] = {}
+    for cache_key, findings_json in rows:
+        try:
+            out[cache_key] = json.loads(findings_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
+
+
+def store_tool_cache(entries: List[Dict[str, Any]]) -> None:
+    """Batch upsert cache rows. Each entry: cache_key, tool, findings_json (str)."""
+    if not entries:
+        return
+    now = datetime.now(timezone.utc)
+    with session_scope() as session:
+        stmt = pg_insert(ToolResultCache).values(
+            [
+                {
+                    "cache_key": e["cache_key"],
+                    "tool": e["tool"],
+                    "findings_json": e["findings_json"],
+                    "created_at": now,
+                }
+                for e in entries
+            ]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cache_key"],
+            set_={
+                "findings_json": stmt.excluded.findings_json,
+                "created_at": stmt.excluded.created_at,
+            },
+        )
+        session.execute(stmt)

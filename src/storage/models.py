@@ -69,3 +69,17 @@ class FeedbackEvent(Base):
             postgresql_where=text("event_type = 'reaction'"),
         ),
     )
+
+
+class ToolResultCache(Base):
+    """Cache of tool results (Semgrep, linter, CodeQL) keyed by content/commit hash. TTL at read time."""
+
+    __tablename__ = "tool_result_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cache_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    tool: Mapped[str] = mapped_column(String(32), nullable=False)
+    findings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )

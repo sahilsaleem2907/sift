@@ -1,5 +1,7 @@
 """Orchestrate PR review: diff -> split by file -> per-file LLM -> summary -> post comments + issue comment -> store."""
+import asyncio
 import hashlib
+import json
 import logging
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -7,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from src import config
 from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
-from src.core.linter_runner import run_linters
+from src.core.linter_runner import run_linters, _detect_linter
 from src.core.semgrep_runner import run_semgrep
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
@@ -21,7 +23,12 @@ from src.core.analysis_routing import (
 # from src.intelligence.ast.diff_ast import build_diff_ast
 from src.intelligence.ast.function_extract import extract_modified_functions
 from src.intelligence.llm_client import review_file, summarize_review
-from src.storage.database import get_avg_quality_score_for_path_pattern, store_review
+from src.storage.database import (
+    get_avg_quality_score_for_path_pattern,
+    get_tool_cache_hits,
+    store_review,
+    store_tool_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,69 @@ def _has_security_sensitive_function(mod_funcs: list) -> bool:
 def _diff_content_key(file_diff: str) -> str:
     """Stable hash for diff content so we don't run the LLM for the same code block twice."""
     return hashlib.sha256(file_diff.strip().encode("utf-8")).hexdigest()
+
+
+def _tool_cache_key(tool: str, path: str, content: str, linter_name: Optional[str] = None) -> Optional[str]:
+    """Cache key for tool result. For linter, linter_name required (from _detect_linter). Returns None if not cacheable."""
+    if tool == "semgrep":
+        return hashlib.sha256(("semgrep" + content).encode("utf-8")).hexdigest()
+    if tool == "linter":
+        if not linter_name:
+            return None
+        return hashlib.sha256(("linter:" + linter_name + ":" + content).encode("utf-8")).hexdigest()
+    return None
+
+
+def _check_and_split_cache(
+    tool: str,
+    path_to_content: Dict[str, str],
+    ttl_hours: int,
+) -> Tuple[Dict[str, List[Any]], Dict[str, str]]:
+    """Return (cached_results_by_path, uncached_input). uncached_input is path -> content for cache misses."""
+    if not path_to_content or ttl_hours <= 0:
+        return {}, dict(path_to_content)
+    path_to_key: Dict[str, str] = {}
+    for path, content in path_to_content.items():
+        linter_name = _detect_linter(path) if tool == "linter" else None
+        key = _tool_cache_key(tool, path, content, linter_name)
+        if key is not None:
+            path_to_key[path] = key
+    if not path_to_key:
+        return {}, dict(path_to_content)
+    keys = list(path_to_key.values())
+    hits = get_tool_cache_hits(keys, ttl_hours)
+    cached_results: Dict[str, List[Any]] = {
+        path: hits[key] for path, key in path_to_key.items() if key in hits
+    }
+    uncached_input = {
+        path: content for path, content in path_to_content.items()
+        if path_to_key.get(path) not in hits
+    }
+    return cached_results, uncached_input
+
+
+def _store_results_cache(
+    tool: str,
+    path_to_content: Dict[str, str],
+    results_by_path: Dict[str, List[Any]],
+) -> None:
+    """Store tool results in cache. path_to_content is the input that was run (e.g. uncached subset)."""
+    if not path_to_content:
+        return
+    entries: List[Dict[str, Any]] = []
+    for path, content in path_to_content.items():
+        linter_name = _detect_linter(path) if tool == "linter" else None
+        key = _tool_cache_key(tool, path, content, linter_name)
+        if key is None:
+            continue
+        findings = results_by_path.get(path, [])
+        entries.append({
+            "cache_key": key,
+            "tool": tool,
+            "findings_json": json.dumps(findings),
+        })
+    if entries:
+        store_tool_cache(entries)
 
 
 def _merge_comments_by_line(collected: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -195,29 +265,34 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     "[Smart routing] Running Semgrep on %d path(s): %s",
                     len(semgrep_input), sorted(semgrep_input.keys()) if semgrep_input else [],
                 )
-                findings_by_path = run_semgrep(semgrep_input)
-                if findings_by_path:
-                    total_semgrep = sum(len(v) for v in findings_by_path.values())
-                    logger.debug(
-                        "Semgrep (entire run): %d path(s), %d total findings: %s",
-                        len(findings_by_path),
-                        total_semgrep,
-                        {p: len(f) for p, f in findings_by_path.items()},
-                    )
-                    logger.debug("Semgrep findings fully: %s", findings_by_path)
-                linter_issues_by_path = run_linters(linter_input)
             else:
-                findings_by_path = run_semgrep(path_to_content)
-                if findings_by_path:
-                    total_semgrep = sum(len(v) for v in findings_by_path.values())
+                semgrep_input = path_to_content
+                linter_input = path_to_content
+
+            # Tool result cache: split into cached vs uncached so we only run on misses
+            ttl_hours = config.TOOL_CACHE_TTL_HOURS if config.TOOL_CACHE_ENABLED else 0
+            if config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                semgrep_cached, semgrep_uncached = _check_and_split_cache(
+                    "semgrep", semgrep_input, ttl_hours
+                )
+                linter_cached, linter_uncached = _check_and_split_cache(
+                    "linter", linter_input, ttl_hours
+                )
+                if semgrep_cached:
                     logger.debug(
-                        "Semgrep (entire run): %d path(s), %d total findings: %s",
-                        len(findings_by_path),
-                        total_semgrep,
-                        {p: len(f) for p, f in findings_by_path.items()},
+                        "[Tool cache REUSED] Semgrep: %d path(s) skipped run (using cached results): %s",
+                        len(semgrep_cached),
+                        sorted(semgrep_cached.keys()),
                     )
-                    logger.debug("Semgrep findings fully: %s", findings_by_path)
-                linter_issues_by_path = run_linters(path_to_content)
+                if linter_cached:
+                    logger.debug(
+                        "[Tool cache REUSED] Linter: %d path(s) skipped run (using cached results): %s",
+                        len(linter_cached),
+                        sorted(linter_cached.keys()),
+                    )
+            else:
+                semgrep_cached, semgrep_uncached = {}, semgrep_input
+                linter_cached, linter_uncached = {}, linter_input
 
             codeql_findings_by_path: Dict[str, List[dict]] = {}
             run_codeql_this_pr = config.CODEQL_ENABLED and (
@@ -233,27 +308,125 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     logger.debug(
                         "[Smart routing] Skipping CodeQL (no CRITICAL code files in this PR)",
                     )
-            if run_codeql_this_pr:
-                try:
-                    source_root = get_repo_at_commit(owner, repo, commit_id, token)
-                    codeql_langs = languages_from_paths([p for p, _ in file_chunks])
-                    codeql_findings_by_path = run_codeql(
-                        source_root,
-                        config.CODEQL_SUITE,
-                        codeql_langs,
-                        config.CODEQL_TIMEOUT,
-                    )
-                    if codeql_findings_by_path:
-                        total_codeql = sum(len(v) for v in codeql_findings_by_path.values())
-                        logger.debug(
-                            "CodeQL (entire repo): %d path(s), %d total findings: %s",
-                            len(codeql_findings_by_path),
-                            total_codeql,
-                            {p: len(findings) for p, findings in codeql_findings_by_path.items()},
+
+            codeql_cache_key: Optional[str] = None
+            if run_codeql_this_pr and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                codeql_langs_for_key = languages_from_paths([p for p, _ in file_chunks])
+                codeql_cache_key = hashlib.sha256(
+                    (
+                        "codeql:" + repo_full + ":" + commit_id + ":"
+                        + config.CODEQL_SUITE + ":" + ",".join(sorted(codeql_langs_for_key))
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            async def _run_codeql_task() -> Dict[str, List[dict]]:
+                def _run() -> Dict[str, List[dict]]:
+                    if codeql_cache_key and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                        hits = get_tool_cache_hits([codeql_cache_key], ttl_hours)
+                        if codeql_cache_key in hits:
+                            cached = hits[codeql_cache_key]
+                            if isinstance(cached, dict):
+                                logger.debug(
+                                    "[Tool cache REUSED] CodeQL: using cached results for %s (skipped run)",
+                                    repo_full,
+                                )
+                                return cached
+                    try:
+                        source_root = get_repo_at_commit(owner, repo, commit_id, token)
+                        codeql_langs = languages_from_paths([p for p, _ in file_chunks])
+                        result = run_codeql(
+                            source_root,
+                            config.CODEQL_SUITE,
+                            codeql_langs,
+                            config.CODEQL_TIMEOUT,
                         )
-                        logger.debug("CodeQL findings for entire repo: %s", codeql_findings_by_path)
-                except Exception as e:
-                    logger.warning("CodeQL skipped: %s", e)
+                        if codeql_cache_key and config.TOOL_CACHE_ENABLED and result:
+                            store_tool_cache([{
+                                "cache_key": codeql_cache_key,
+                                "tool": "codeql",
+                                "findings_json": json.dumps(result),
+                            }])
+                        return result
+                    except Exception as e:
+                        logger.warning("CodeQL skipped: %s", e)
+                        return {}
+
+                return await asyncio.to_thread(_run)
+
+            async def _codeql_or_empty() -> Dict[str, List[dict]]:
+                if not run_codeql_this_pr:
+                    return {}
+                return await _run_codeql_task()
+
+            semgrep_result, linter_result, codeql_result = await asyncio.gather(
+                asyncio.to_thread(run_semgrep, semgrep_uncached),
+                asyncio.to_thread(run_linters, linter_uncached),
+                _codeql_or_empty(),
+                return_exceptions=True,
+            )
+
+            if isinstance(semgrep_result, BaseException):
+                logger.warning("Semgrep failed: %s", semgrep_result)
+                findings_by_path = dict(semgrep_cached)
+                if semgrep_cached:
+                    logger.debug(
+                        "[Tool cache REUSED] Semgrep: using %d cached path(s) only (run failed)",
+                        len(semgrep_cached),
+                    )
+            else:
+                findings_by_path = {**semgrep_cached, **semgrep_result}
+                if semgrep_cached or semgrep_result:
+                    logger.debug(
+                        "[Tool cache REUSED] Semgrep: %d from cache, %d from run, total %d path(s)",
+                        len(semgrep_cached),
+                        len(semgrep_result),
+                        len(findings_by_path),
+                    )
+                if config.TOOL_CACHE_ENABLED and semgrep_uncached:
+                    _store_results_cache("semgrep", semgrep_uncached, semgrep_result)
+            if isinstance(linter_result, BaseException):
+                logger.warning("Linters failed: %s", linter_result)
+                linter_issues_by_path = dict(linter_cached)
+                if linter_cached:
+                    logger.debug(
+                        "[Tool cache REUSED] Linter: using %d cached path(s) only (run failed)",
+                        len(linter_cached),
+                    )
+            else:
+                linter_issues_by_path = {**linter_cached, **linter_result}
+                if linter_cached or linter_result:
+                    logger.debug(
+                        "[Tool cache REUSED] Linter: %d from cache, %d from run, total %d path(s)",
+                        len(linter_cached),
+                        len(linter_result),
+                        len(linter_issues_by_path),
+                    )
+                if config.TOOL_CACHE_ENABLED and linter_uncached:
+                    _store_results_cache("linter", linter_uncached, linter_result)
+            if isinstance(codeql_result, BaseException):
+                logger.warning("CodeQL failed: %s", codeql_result)
+                codeql_findings_by_path = {}
+            else:
+                codeql_findings_by_path = codeql_result
+
+            if findings_by_path:
+                total_semgrep = sum(len(v) for v in findings_by_path.values())
+                logger.debug(
+                    "Semgrep (entire run): %d path(s), %d total findings: %s",
+                    len(findings_by_path),
+                    total_semgrep,
+                    {p: len(f) for p, f in findings_by_path.items()},
+                )
+                logger.debug("Semgrep findings fully: %s", findings_by_path)
+            if codeql_findings_by_path:
+                total_codeql = sum(len(v) for v in codeql_findings_by_path.values())
+                logger.debug(
+                    "CodeQL (entire repo): %d path(s), %d total findings: %s",
+                    len(codeql_findings_by_path),
+                    total_codeql,
+                    {p: len(findings) for p, findings in codeql_findings_by_path.items()},
+                )
+                logger.debug("CodeQL findings for entire repo: %s", codeql_findings_by_path)
             total_linter_issues = sum(len(v) for v in linter_issues_by_path.values())
             if linter_issues_by_path:
                 logger.debug(

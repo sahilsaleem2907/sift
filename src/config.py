@@ -34,6 +34,11 @@ if _sift_clones:
 else:
     SIFT_CLONE_CACHE_DIR = Path.home() / ".sift" / "clones"
 
+# Tool result cache (Semgrep, linter, CodeQL); default enabled, 24h TTL
+_TOOL_CACHE_RAW = (os.environ.get("TOOL_CACHE_ENABLED") or "1").strip().lower()
+TOOL_CACHE_ENABLED = _TOOL_CACHE_RAW in ("1", "true", "yes")
+TOOL_CACHE_TTL_HOURS = int(os.environ.get("TOOL_CACHE_TTL_HOURS") or "24")
+
 # Smart analysis routing (optional; default disabled)
 _SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "0").strip().lower()
 SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
