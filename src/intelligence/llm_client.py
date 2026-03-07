@@ -152,7 +152,8 @@ def _format_semgrep_findings(findings: List[Dict[str, Any]]) -> str:
         msg = (f.get("message") or "").strip()
         severity = f.get("severity") or "WARNING"
         rule_id = f.get("check_id") or ""
-        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity})")
+        suffix = " [FILE-WIDE]" if f.get("critical_bypass") else ""
+        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity}){suffix}")
     return "Semgrep findings for this file (consider in your review):\n" + "\n".join(lines)
 
 
@@ -207,6 +208,8 @@ def _format_linter_issues(issues: List[Dict[str, Any]]) -> str:
         if rule_id:
             part += f" / {rule_id}"
         part += f"]: {msg}"
+        if i.get("critical_bypass"):
+            part += " [FILE-WIDE]"
         if snippet:
             part += f"\n  Code:   {snippet}"
         lines.append(part)
@@ -223,7 +226,8 @@ def _format_codeql_findings(findings: List[Dict[str, Any]]) -> str:
         msg = (f.get("message") or "").strip()
         severity = f.get("severity") or "WARNING"
         rule_id = f.get("check_id") or ""
-        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity})")
+        suffix = " [FILE-WIDE]" if f.get("critical_bypass") else ""
+        lines.append(f"Line {line}: [{rule_id}] {msg} (severity: {severity}){suffix}")
     return "CodeQL findings for this file (consider in your review):\n" + "\n".join(lines)
 
 

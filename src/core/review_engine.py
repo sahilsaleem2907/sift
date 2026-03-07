@@ -196,9 +196,27 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     len(semgrep_input), sorted(semgrep_input.keys()) if semgrep_input else [],
                 )
                 findings_by_path = run_semgrep(semgrep_input)
+                if findings_by_path:
+                    total_semgrep = sum(len(v) for v in findings_by_path.values())
+                    logger.debug(
+                        "Semgrep (entire run): %d path(s), %d total findings: %s",
+                        len(findings_by_path),
+                        total_semgrep,
+                        {p: len(f) for p, f in findings_by_path.items()},
+                    )
+                    logger.debug("Semgrep findings fully: %s", findings_by_path)
                 linter_issues_by_path = run_linters(linter_input)
             else:
                 findings_by_path = run_semgrep(path_to_content)
+                if findings_by_path:
+                    total_semgrep = sum(len(v) for v in findings_by_path.values())
+                    logger.debug(
+                        "Semgrep (entire run): %d path(s), %d total findings: %s",
+                        len(findings_by_path),
+                        total_semgrep,
+                        {p: len(f) for p, f in findings_by_path.items()},
+                    )
+                    logger.debug("Semgrep findings fully: %s", findings_by_path)
                 linter_issues_by_path = run_linters(path_to_content)
 
             codeql_findings_by_path: Dict[str, List[dict]] = {}
@@ -274,62 +292,81 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                         continue
 
                 diff_lines = diff_lines_per_path.get(path0, set())
-                # Only attach semgrep/codeql findings when this path was in the tool set
+                # Semgrep: diff-filtered + critical (ERROR severity) bypass
                 if config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths:
-                    findings_on_diff = []
+                    semgrep_for_llm: List[Dict[str, Any]] = []
                 else:
-                    findings_on_diff = [
-                        f
-                        for f in findings_by_path.get(path0, [])
-                        if f.get("line") in diff_lines
+                    all_semgrep = findings_by_path.get(path0, [])
+                    semgrep_on_diff = [f for f in all_semgrep if f.get("line") in diff_lines]
+                    semgrep_critical = [
+                        {**f, "critical_bypass": True}
+                        for f in all_semgrep
+                        if f not in semgrep_on_diff and (f.get("severity") or "").upper() == "ERROR"
                     ]
+                    semgrep_for_llm = semgrep_on_diff + semgrep_critical
+                    if all_semgrep:
+                        logger.debug(
+                            "Semgrep filter path=%s: raw=%d, on_diff=%d, critical_bypass=%d, for_llm=%d",
+                            path0,
+                            len(all_semgrep),
+                            len(semgrep_on_diff),
+                            len(semgrep_critical),
+                            len(semgrep_for_llm),
+                        )
+                        logger.debug(
+                            "Semgrep findings fully path=%s: all=%s on_diff=%s critical=%s for_llm=%s",
+                            path0,
+                            all_semgrep,
+                            semgrep_on_diff,
+                            semgrep_critical,
+                            semgrep_for_llm,
+                        )
+                # CodeQL: same pattern
                 if config.SIFT_SMART_ROUTING_ENABLED and path0 not in codeql_paths:
-                    codeql_on_diff = []
+                    codeql_for_llm: List[Dict[str, Any]] = []
                 else:
-                    codeql_on_diff = [
-                        f
-                        for f in codeql_findings_by_path.get(path0, [])
-                        if f.get("line") in diff_lines
+                    all_codeql = codeql_findings_by_path.get(path0, [])
+                    codeql_on_diff = [f for f in all_codeql if f.get("line") in diff_lines]
+                    codeql_critical = [
+                        {**f, "critical_bypass": True}
+                        for f in all_codeql
+                        if f not in codeql_on_diff and (f.get("severity") or "").upper() == "ERROR"
                     ]
+                    codeql_for_llm = codeql_on_diff + codeql_critical
                 if config.SIFT_SMART_ROUTING_ENABLED:
                     logger.debug(
-                        "[Smart routing] LLM context for %s: linter=%s semgrep=%s codeql=%s (on-diff lines)",
+                        "[Smart routing] LLM context for %s: linter=%s semgrep=%s codeql=%s",
                         path0,
                         "yes" if path0 in linter_paths else "no",
-                        len(findings_on_diff),
-                        len(codeql_on_diff),
+                        len(semgrep_for_llm),
+                        len(codeql_for_llm),
                     )
                 file_pr_context: Dict[str, Any] = {
                     **(pr_context or {}),
-                    "semgrep_findings": findings_on_diff,
-                    "codeql_findings": codeql_on_diff,
+                    "semgrep_findings": semgrep_for_llm,
+                    "codeql_findings": codeql_for_llm,
                 }
 
-                # source = path_to_content.get(path0)
-                # if source is not None:
-                #     try:
-                #         ast_diff = build_diff_ast(path0, source, file_diff)
-                #         if ast_diff is not None:
-                #             file_pr_context["ast_diff"] = ast_diff
-                #     except Exception as e:
-                #         logger.warning("build_diff_ast failed for %s: %s", path0, e)
                 raw_linter_list = linter_issues_by_path.get(path0, []) if (not config.SIFT_SMART_ROUTING_ENABLED or path0 in linter_paths) else []
                 raw_linter_count = len(raw_linter_list)
-                linter_on_diff = [
-                    i for i in raw_linter_list
-                    if i.get("line") in diff_lines
+                linter_on_diff = [i for i in raw_linter_list if i.get("line") in diff_lines]
+                linter_critical = [
+                    {**i, "critical_bypass": True}
+                    for i in raw_linter_list
+                    if i not in linter_on_diff and (i.get("severity") or "").lower() == "error"
                 ]
+                linter_for_llm = linter_on_diff + linter_critical
                 if raw_linter_count > 0:
                     logger.debug(
-                        "Linter filter: path=%s, raw_issues=%d, on_diff_lines=%d, diff_line_set_size=%d",
+                        "Linter filter: path=%s, raw=%d, on_diff=%d, critical_bypass=%d",
                         path0,
                         raw_linter_count,
                         len(linter_on_diff),
-                        len(diff_lines),
+                        len(linter_critical),
                     )
                 file_lines = (path_to_content.get(path0) or "").splitlines()
                 linter_issues_with_snippets: List[Dict[str, Any]] = []
-                for i in linter_on_diff:
+                for i in linter_for_llm:
                     line_no = i.get("line")
                     snippet = ""
                     if line_no is not None and 1 <= line_no <= len(file_lines):
@@ -340,8 +377,8 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                     })
                 file_pr_context = {
                     **(pr_context or {}),
-                    "semgrep_findings": findings_on_diff,
-                    "codeql_findings": codeql_on_diff,
+                    "semgrep_findings": semgrep_for_llm,
+                    "codeql_findings": codeql_for_llm,
                     "linter_issues": linter_issues_with_snippets,
                 }
 
@@ -405,12 +442,7 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
 
                 try:
                     comments = await review_file(file_diff, path0, file_pr_context)
-                    # One comment per line for this code block (LLM might return duplicate lines)
-                    seen_line: set[int] = set()
                     for c in comments:
-                        if c["line"] in seen_line:
-                            continue
-                        seen_line.add(c["line"])
                         for path, _ in path_diff_list:
                             collected.append(
                                 {"path": path, "line": c["line"], "body": c["body"]}
