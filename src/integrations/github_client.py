@@ -98,6 +98,19 @@ class GitHubClient:
         r.raise_for_status()
         return r.text
 
+    async def get_compare_diff(
+        self, owner: str, repo: str, base_sha: str, head_sha: str
+    ) -> str:
+        """Fetch diff between two commits (e.g. previous head and current head for incremental review)."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        r = await self._client.get(
+            f"/repos/{owner}/{repo}/compare/{base_sha}...{head_sha}",
+            headers={"Accept": "application/vnd.github.v3.diff"},
+        )
+        r.raise_for_status()
+        return r.text
+
     async def get_pr_details(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
         """Fetch PR metadata (title, body, head_sha) for context."""
         if not self._client:

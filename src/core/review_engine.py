@@ -142,9 +142,16 @@ def _merge_comments_by_line(collected: List[Dict[str, Any]]) -> List[Dict[str, A
     return merged
 
 
-async def run_review(owner: str, repo: str, pr_number: int, installation_id: int) -> None:
+async def run_review(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    installation_id: int,
+    before_sha: Optional[str] = None,
+) -> None:
     """Run the full review flow: fetch diff, split by file, per-file LLM, summarize, post inline comments + summary, store.
 
+    When before_sha is set (e.g. for synchronize), reviews only the delta between before_sha and current PR head.
     Logs and swallows exceptions so the webhook response is not affected.
     """
     repo_full = f"{owner}/{repo}"
@@ -153,7 +160,9 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
         async with GitHubClient(installation_id, token=token) as github:
             logger.info("Starting review for %s PR #%s", repo_full, pr_number)
 
-            diff, pr_context = await get_diff_for_review(owner, repo, pr_number, github)
+            diff, pr_context = await get_diff_for_review(
+                owner, repo, pr_number, github, before_sha=before_sha
+            )
             if not diff.strip():
                 logger.warning("Empty diff for %s PR #%s", repo_full, pr_number)
                 return
