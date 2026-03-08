@@ -15,31 +15,73 @@ SYSTEM_PROMPT = """You are a concise code reviewer. Given a git diff, provide a 
 - A few bullet points on correctness, style, and possible improvements.
 - Be brief and actionable. Do not repeat the diff."""
 
-REVIEW_FILE_SYSTEM = """You are a code reviewer. Given a single file's unified diff, write your review in plain text or markdown.
+REVIEW_FILE_SYSTEM = """You are a code reviewer focused on correctness. Your job is to find real bugs and issues.
 
-CRITICAL - Understanding the diff:
-- Lines starting with "-" are OLD (removed); do NOT cite these line numbers in your review.
-- Lines starting with "+" are NEW (added/changed); these are the only lines you should reference.
-- When you mention a line number, it must be the line number in the NEW file (the right side), i.e. a "+" line. Never cite line numbers from "-" (removed) lines.
+Look specifically for:
+- Logic errors, wrong conditions, off-by-one errors
+- Unhandled None/null dereferences
+- Unhandled exceptions or missing error handling
+- Security issues (injection, auth bypass, improper validation)
+- Resource leaks (unclosed files/connections)
+- Type mismatches or wrong API usage
 
-FORMAT - So we can attach your comments to the right line, you MUST start each comment with exactly "Line N:" where N is the new-file line number (e.g. "Line 11:"). Then write your issue description and optional suggested fix.
+Respond ONLY with a JSON array. No prose, no markdown fences around the array. Each element:
+{
+  "line": <integer — must be a line number marked [L<n>] in the diff below>,
+  "severity": "bug" | "security" | "warning" | "suggestion",
+  "title": "<10 words max>",
+  "body": "<description of the issue>",
+  "fix": "<optional: corrected code only, no diff markers>"
+}
 
-SUGGESTED FIX - When you suggest a fix, you MUST include a fenced code block:
-- Use a code block with the file's language tag (e.g. ```python, ```js, ```go). The block must contain ONLY the corrected code that the developer can copy and paste.
-- Do NOT put diff markers (+, -, @@) or line numbers inside the code block. Do NOT show "before/after" or context lines—only the fix code.
-- The code must be directly copy-pasteable as a replacement.
-
-Example:
-Line 11: The variable `x` is used before being defined. **Suggested fix:**
-
-```python
-x = get_default_value()
-if x is not None:
-    process(x)
-```
+Rules:
+- "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
+- Only report issues on changed lines (marked with +).
+- Omit "fix" if no clean fix is obvious.
+- Return [] if there is nothing significant to report.
 """
 
 SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
+
+# Match severity badge at start of comment body (text or shields.io image).
+_SUMMARY_SEVERITY_RE = re.compile(r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*(.*)")
+_SUMMARY_SHIELD_RE = re.compile(r"^!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*(.*)", re.DOTALL)
+
+# Hunk header for unified diff: @@ -old_start[,old_count] +new_start[,new_count] @@
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+
+
+def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
+    """Append [L<n>] to each '+' line in the diff so the LLM can cite exact new-file line numbers."""
+    if not diff_chunk or not diff_chunk.strip():
+        return diff_chunk
+    comment_marker = "  # " if (path.endswith(".py") or ".py/" in path) else "  // "
+    lines_out: List[str] = []
+    current_new_line: Optional[int] = None
+    for line in diff_chunk.splitlines():
+        m = _DIFF_HUNK_RE.match(line)
+        if m:
+            current_new_line = int(m.group(1))
+            lines_out.append(line)
+            continue
+        if current_new_line is None:
+            lines_out.append(line)
+            continue
+        if not line:
+            lines_out.append(line)
+            continue
+        prefix = line[0]
+        if prefix == " ":
+            current_new_line += 1
+            lines_out.append(line)
+        elif prefix == "+" and not line.startswith("+++"):
+            lines_out.append(line + comment_marker + f"[L{current_new_line}]")
+            current_new_line += 1
+        elif prefix == "-" and not line.startswith("---"):
+            lines_out.append(line)
+        else:
+            lines_out.append(line)
+    return "\n".join(lines_out)
 
 
 async def _call_ollama(system: str, user_content: str) -> str:
@@ -114,17 +156,111 @@ def _normalize_comment_body(body: str) -> str:
     return text
 
 
+# Severity badge markdown (shields.io) for inline comments and summary. Order: bug, security, warning, suggestion.
+_BADGE_STYLE = "plastic"
+_SEV_META = [
+    ("bug", f"![BUG](https://img.shields.io/badge/BUG-FF4444?style={_BADGE_STYLE})"),
+    ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-FF8C00?style={_BADGE_STYLE})"),
+    ("warning", f"![WARNING](https://img.shields.io/badge/WARNING-FFD700?style={_BADGE_STYLE})"),
+    ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-4A90D9?style={_BADGE_STYLE})"),
+]
+_SEV_BADGE_BY_KEY = {key: badge for key, badge in _SEV_META}
+
+
+def _format_structured_comment_body(item: Dict[str, Any]) -> str:
+    """Turn a parsed JSON review item into a consistent GitHub markdown comment."""
+    severity = (item.get("severity") or "suggestion").lower()
+    badge = _SEV_BADGE_BY_KEY.get(severity, _SEV_BADGE_BY_KEY["suggestion"])
+    title = (item.get("title") or "").strip() or "Issue"
+    body_text = (item.get("body") or "").strip()
+    fix = (item.get("fix") or "").strip()
+    parts = [f"{badge} {title}"]
+    if body_text:
+        parts.append("\n\n" + body_text)
+    if fix:
+        fix_clean = _strip_diff_markers_from_code_block(fix)
+        parts.append("\n\n**Suggested fix:**\n\n```\n" + fix_clean + "\n```")
+    return "".join(parts)
+
+
+def _extract_json_array(raw: str) -> Optional[List[Any]]:
+    """Extract a JSON array from raw LLM output (may be wrapped in prose or markdown)."""
+    text = raw.strip()
+    # Find first '[' and last ']' to get the array slice
+    start = text.find("[")
+    if start < 0:
+        return None
+    depth = 0
+    end = -1
+    in_string = None
+    i = start
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if c == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            in_string = c
+            i += 1
+            continue
+        if c == "[":
+            depth += 1
+            i += 1
+            continue
+        if c == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+            i += 1
+            continue
+        i += 1
+    if end < 0:
+        return None
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError:
+        return None
+
+
 def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
-    """Parse freeform LLM response into list of {line, body}. Extracts line numbers from text."""
+    """Parse LLM response: prefer JSON array; fall back to freeform line-ref regex."""
     if not raw or not raw.strip():
         return []
     text = raw.strip()
+
+    # Try structured JSON first
+    arr = _extract_json_array(text)
+    if arr is not None and isinstance(arr, list):
+        out: List[Dict[str, Any]] = []
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            try:
+                line_val = item.get("line")
+                line_int = int(line_val) if line_val is not None else None
+            except (TypeError, ValueError):
+                continue
+            if line_int is None or line_int <= 0:
+                continue
+            body = _format_structured_comment_body(item)
+            if body.strip():
+                out.append({"line": line_int, "body": body})
+        if out:
+            return out
+        logger.debug("JSON array empty or invalid items for %s", path)
+
+    # Fallback: freeform "Line N:" parsing
     matches = list(_LINE_REF_RE.finditer(text))
     if not matches:
         logger.debug("No line references found in review for %s", path)
         return []
-
-    out: List[Dict[str, Any]] = []
+    out = []
     for i, m in enumerate(matches):
         try:
             line_int = int(m.group(1))
@@ -140,6 +276,28 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
         body = _normalize_comment_body(body)
         out.append({"line": line_int, "body": body})
     return out
+
+
+def _format_file_context(file_context: Dict[str, Any]) -> str:
+    """Format surrounding file context (read-only) for the LLM: path, line ranges, and numbered lines."""
+    path = file_context.get("path") or "?"
+    content = (file_context.get("content") or "").strip()
+    ranges = file_context.get("ranges") or []
+    if not content or not ranges:
+        return ""
+    lines = content.splitlines()
+    out_lines: List[str] = [
+        "Surrounding context (read-only, for understanding the change):",
+        f"File: {path}",
+    ]
+    for start, end in ranges:
+        if start > len(lines) or end < 1:
+            continue
+        out_lines.append(f"Lines {start}–{end}:")
+        for i in range(max(0, start - 1), min(len(lines), end)):
+            out_lines.append(f"  {i + 1:4d} | {lines[i]}")
+        out_lines.append("")
+    return "\n".join(out_lines).strip()
 
 
 def _format_semgrep_findings(findings: List[Dict[str, Any]]) -> str:
@@ -262,6 +420,11 @@ async def review_file(
     """
     user_parts = []
     if pr_context:
+        file_context = pr_context.get("file_context")
+        if file_context:
+            fc_block = _format_file_context(file_context)
+            if fc_block:
+                user_parts.append(fc_block)
         semgrep_findings = pr_context.get("semgrep_findings") or []
         semgrep_block = _format_semgrep_findings(semgrep_findings)
         if semgrep_block:
@@ -299,25 +462,11 @@ async def review_file(
 
     diff_intro = (
         f"File: {path}\n\n"
-        "Diff (legend: '-' = old/removed, '+' = new/added — cite line numbers only for '+' lines)."
+        "Diff (legend: '-' = old/removed, '+' = new/added). Each added line is annotated with [L<n>] — use that integer as \"line\" in your JSON."
     )
-    # Use line numbers derived from the diff itself (where '+' lines are in the new file),
-    # so the LLM is told the correct line numbers (e.g. 11 for the changed line, not the hunk start 8).
-    ranges = get_new_file_plus_line_ranges(diff_chunk)
-    if ranges:
-        line_nums = []
-        for start, end in ranges:
-            if start == end:
-                line_nums.append(str(start))
-            else:
-                line_nums.append(f"{start}-{end}")
-        if line_nums:
-            diff_intro += (
-                f" The '+' lines in the diff below are at new-file line(s): {', '.join(line_nums)}. "
-                f"Cite these line numbers using the format 'Line N:' (e.g. Line {line_nums[0].split('-')[0]}:) at the start of each comment."
-            )
     diff_intro += "\n\n"
-    user_parts.append(diff_intro + diff_chunk)
+    annotated_diff = _annotate_diff_with_line_numbers(diff_chunk, path)
+    user_parts.append(diff_intro + annotated_diff)
 
     similar_snippets = (pr_context or {}).get("similar_snippets")
     if similar_snippets:
@@ -352,23 +501,86 @@ async def review_file(
     return _parse_review_file_response(raw, path)
 
 
-async def summarize_review(comments: List[Dict[str, Any]]) -> str:
-    """Produce a short summary string for the Conversation tab from the list of comments we're posting.
+def _summary_severity_and_title(body: str) -> tuple:
+    """Extract (severity_key, title) from comment body. severity_key is lowercase for counting."""
+    if not body or not body.strip():
+        return ("suggestion", "")
+    text = body.strip()
+    m = _SUMMARY_SHIELD_RE.match(text)
+    if m:
+        return (m.group(1).lower(), (m.group(2) or "").strip().split("\n")[0].strip())
+    m = _SUMMARY_SEVERITY_RE.match(text)
+    if m:
+        return (m.group(1).lower(), (m.group(2) or "").strip().split("\n")[0].strip())
+    # Merged comments: "**Issues:**\n- badge ..." or first shield in body
+    if "**Issues:**" in text or "!(" in text:
+        m2 = _SUMMARY_SHIELD_RE.search(text) or _SUMMARY_SEVERITY_RE.search(text)
+        if m2:
+            return (m2.group(1).lower(), (m2.group(2) or "").strip().split("\n")[0].strip())
+    return ("suggestion", text.split("\n")[0].strip() if text else "")
 
-    comments: list of {path, line, body} (or at least body for each).
-    """
+
+def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
+    """Build a structured summary: headline, severity count table (badges, non-zero only), per-file issue tables, footer."""
     if not comments:
         return "No inline comments for this review."
-    lines = []
+
+    counts: Dict[str, int] = {"bug": 0, "security": 0, "warning": 0, "suggestion": 0}
+    by_path: Dict[str, List[Dict[str, Any]]] = {}
     for c in comments:
         path = c.get("path", "?")
         line = c.get("line", "?")
         body = (c.get("body") or "").strip()
-        if body:
-            lines.append(f"- **{path}** (line {line}): {body}")
-    user_content = "Inline comments being posted:\n\n" + "\n".join(lines)
-    raw = await _call_ollama(SUMMARIZE_SYSTEM, user_content)
-    return raw if raw else "Review completed with inline comments on the Files changed tab."
+        if not body:
+            continue
+        sev, title = _summary_severity_and_title(body)
+        counts[sev] = counts.get(sev, 0) + 1
+        by_path.setdefault(path, []).append({
+            "line": line,
+            "sev": sev,
+            "title": title or "(see inline)",
+            "body": body,
+        })
+
+    total = sum(counts.values())
+    num_files = len(by_path)
+    lines: List[str] = [
+        "## Sift Review",
+        "",
+        f"> {total} issue(s) found across {num_files} file(s)",
+        "",
+        "| Badge | Count |",
+        "|-------|-------|",
+    ]
+    for key, badge in _SEV_META:
+        n = counts.get(key, 0)
+        if n > 0:
+            lines.append(f"| {badge} | {n} |")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    for path in sorted(by_path.keys()):
+        items = sorted(by_path[path], key=lambda x: x["line"])
+        lines.append(f"### `{path}`")
+        lines.append("| Line | Severity | Issue |")
+        lines.append("|------|----------|-------|")
+        for item in items:
+            badge = _SEV_BADGE_BY_KEY.get(item["sev"], _SEV_BADGE_BY_KEY["suggestion"])
+            title_safe = (item["title"] or "").replace("|", ", ").replace("\n", " ")
+            lines.append(f"| {item['line']} | {badge} | {title_safe} |")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("*Inline comments with details and suggested fixes are on the Files changed tab.*")
+    return "\n".join(lines)
+
+
+async def summarize_review(comments: List[Dict[str, Any]]) -> str:
+    """Produce a structured summary for the Conversation tab: status counts and comments by file.
+
+    comments: list of {path, line, body} (or at least body for each).
+    """
+    return _build_structured_summary(comments)
 
 
 async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:

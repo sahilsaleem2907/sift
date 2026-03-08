@@ -20,7 +20,7 @@ from src.core.analysis_routing import (
     risk_level,
     score_risk_combined,
 )
-# from src.intelligence.ast.diff_ast import build_diff_ast
+from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from src.intelligence.ast.function_extract import extract_modified_functions
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import (
@@ -548,11 +548,24 @@ async def run_review(owner: str, repo: str, pr_number: int, installation_id: int
                         **i,
                         "snippet": snippet,
                     })
+                # Surrounding context: ±10 lines around each changed hunk for better LLM understanding
+                file_content = path_to_content.get(path0) or ""
+                num_lines = len(file_lines)
+                plus_ranges = get_new_file_plus_line_ranges(file_diff)
+                expanded_ranges = [
+                    (max(1, s - 10), min(num_lines, e + 10))
+                    for s, e in plus_ranges
+                ]
                 file_pr_context = {
                     **(pr_context or {}),
                     "semgrep_findings": semgrep_for_llm,
                     "codeql_findings": codeql_for_llm,
                     "linter_issues": linter_issues_with_snippets,
+                    "file_context": {
+                        "path": path0,
+                        "ranges": expanded_ranges,
+                        "content": file_content,
+                    },
                 }
 
                 if config.VECTOR_DB_ENABLED:
