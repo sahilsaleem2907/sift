@@ -1,8 +1,9 @@
 """GitHub API client: App JWT, installation token, PR diff, post comment."""
 import base64
 import logging
+import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import jwt
@@ -66,6 +67,25 @@ class GitHubClient:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    async def _paginate_get(
+        self, url: str, *, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None
+    ) -> List[Any]:
+        """GET a paginated list endpoint, following Link rel=next until exhausted."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        merged_params: Dict[str, Any] = {"per_page": 100, **(params or {})}
+        results: List[Any] = []
+        next_url: Optional[str] = url
+        while next_url:
+            r = await self._client.get(next_url, params=merged_params, headers=headers)
+            r.raise_for_status()
+            results.extend(r.json())
+            link_header = r.headers.get("link", "")
+            match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
+            next_url = match.group(1) if match else None
+            merged_params = {}
+        return results
 
     async def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
         """Fetch PR diff as raw text."""
@@ -210,39 +230,27 @@ class GitHubClient:
         self, owner: str, repo: str, comment_id: int
     ) -> list:
         """List reactions on an issue comment. Returns list of dicts with user.login and content."""
-        if not self._client:
-            raise RuntimeError("GitHubClient must be used as async context manager")
-        r = await self._client.get(
+        return await self._paginate_get(
             f"/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
             headers={"Accept": "application/vnd.github+json"},
         )
-        r.raise_for_status()
-        return r.json()
 
     async def list_pull_request_review_comments(
         self, owner: str, repo: str, pr_number: int
     ) -> list:
         """List all pull request review comments (inline) on the PR. Returns list of dicts with id, user.login, etc."""
-        if not self._client:
-            raise RuntimeError("GitHubClient must be used as async context manager")
-        r = await self._client.get(
+        return await self._paginate_get(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         )
-        r.raise_for_status()
-        return r.json()
 
     async def get_review_comment_reactions(
         self, owner: str, repo: str, comment_id: int
     ) -> list:
         """List reactions on a pull request review comment (inline). Returns list of dicts with user.login and content."""
-        if not self._client:
-            raise RuntimeError("GitHubClient must be used as async context manager")
-        r = await self._client.get(
+        return await self._paginate_get(
             f"/repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions",
             headers={"Accept": "application/vnd.github+json"},
         )
-        r.raise_for_status()
-        return r.json()
 
 
 async def get_installation_token(installation_id: int) -> str:
