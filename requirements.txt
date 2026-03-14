@@ -12,3 +12,5 @@ tree_sitter
 tree_sitter_languages
 pylint>=3.0.0
 pgvector>=0.3.0
+litellm==1.82.2
+boto3

@@ -13,9 +13,11 @@ GITHUB_APP_PRIVATE_KEY = os.environ.get("GITHUB_APP_PRIVATE_KEY")
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Ollama (optional, have defaults)
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
+# LLM provider (LiteLLM): model string and optional api_base
+LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
+# Only set when explicitly provided (Ollama/Azure); leave None for OpenAI, Anthropic, Gemini, etc.
+_llm_base = os.environ.get("LLM_API_BASE")
+LLM_API_BASE = _llm_base.rstrip("/") if _llm_base else None
 
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -46,7 +48,10 @@ SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
 # Vector DB / code similarity (optional; default disabled)
 _VECTOR_DB_ENABLED_RAW = (os.environ.get("VECTOR_DB_ENABLED") or "0").strip().lower()
 VECTOR_DB_ENABLED = _VECTOR_DB_ENABLED_RAW in ("1", "true", "yes")
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "ollama/nomic-embed-text")
+# Only set when explicitly provided (Ollama/custom); leave None for OpenAI, Gemini, etc.
+_embed_base = os.environ.get("EMBEDDING_API_BASE")
+EMBEDDING_API_BASE = _embed_base.rstrip("/") if _embed_base else None
 # Dimension for embedding vectors (nomic-embed-text = 768; required for HNSW index)
 EMBEDDING_DIMENSION = int(os.environ.get("EMBEDDING_DIMENSION") or "768")
 VECTOR_SIMILARITY_TOP_K = int(os.environ.get("VECTOR_SIMILARITY_TOP_K") or "5")

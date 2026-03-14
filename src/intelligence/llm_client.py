@@ -1,10 +1,10 @@
-"""Local Ollama integration for code review."""
+"""LLM integration for code review (LiteLLM: OpenAI, Anthropic, Gemini, Ollama, Azure, Bedrock)."""
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
-import httpx
+from litellm import acompletion
 
 from src import config
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
@@ -84,28 +84,18 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
     return "\n".join(lines_out)
 
 
-async def _call_ollama(system: str, user_content: str) -> str:
-    """Call Ollama chat API; return assistant message content or empty string."""
-    base_url = config.OLLAMA_BASE_URL
-    model = config.OLLAMA_MODEL
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
-    ]
-    payload = {"model": model, "messages": messages, "stream": False}
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.post(f"{base_url}/api/chat", json=payload)
-            r.raise_for_status()
-            data = r.json()
-    except httpx.HTTPError as e:
-        logger.error("Ollama request failed: %s", e)
-        raise
-    msg = data.get("message")
-    if not msg or "content" not in msg:
-        logger.warning("Unexpected Ollama response shape: %s", data)
-        return ""
-    return (msg["content"] or "").strip()
+async def _call_llm(system: str, user_content: str) -> str:
+    """Call configured LLM provider via LiteLLM; return assistant message content or empty string."""
+    response = await acompletion(
+        model=config.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+        api_base=config.LLM_API_BASE or None,
+        timeout=120.0,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 # Match line-number references so we can parse LLM output. Supports:
@@ -496,7 +486,7 @@ async def review_file(
         logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
-    raw = await _call_ollama(REVIEW_FILE_SYSTEM, user_content)
+    raw = await _call_llm(REVIEW_FILE_SYSTEM, user_content)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
     return _parse_review_file_response(raw, path)
 
@@ -595,5 +585,5 @@ async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:
         body = pr_context.get("body") or ""
         if title or body:
             user_content = f"PR title: {title}\n\nPR description:\n{body}\n\n---\n\nDiff:\n{diff}"
-    raw = await _call_ollama(SYSTEM_PROMPT, user_content)
+    raw = await _call_llm(SYSTEM_PROMPT, user_content)
     return raw if raw else "Review could not be generated."
