@@ -40,6 +40,11 @@ _AST_FUNCTION_RISK_KEYWORDS = frozenset({
 })
 _AST_FUNCTION_BOOST = 15
 
+# Large PR rate-limit mitigations (no env vars; sensible defaults in code)
+_GITHUB_READ_CONCURRENCY = 5   # max parallel get_file_content calls
+_GITHUB_READ_DELAY = 0.1      # seconds between each read (inside semaphore)
+_LLM_TASK_STAGGER = 0.2       # seconds between launching each LLM task
+
 
 def _has_security_sensitive_function(mod_funcs: list) -> bool:
     """True if any modified function name contains security-sensitive keywords."""
@@ -177,11 +182,17 @@ async def run_review(
                 path: get_diff_line_numbers(fd) for path, fd in file_chunks
             }
 
-            path_to_content: Dict[str, str] = {}
-            for path, _ in file_chunks:
-                content = await github.get_file_content(owner, repo, path, commit_id)
-                if content is not None:
-                    path_to_content[path] = content
+            _github_read_sem = asyncio.Semaphore(_GITHUB_READ_CONCURRENCY)
+
+            async def _fetch_file(path: str) -> Tuple[str, Optional[str]]:
+                async with _github_read_sem:
+                    content = await github.get_file_content(owner, repo, path, commit_id)
+                    if _GITHUB_READ_DELAY > 0:
+                        await asyncio.sleep(_GITHUB_READ_DELAY)
+                    return path, content
+
+            fetch_results = await asyncio.gather(*[_fetch_file(p) for p, _ in file_chunks])
+            path_to_content = {p: c for p, c in fetch_results if c is not None}
 
             # Smart routing: classify and score each path; build tool path sets
             path_to_file_type: Dict[str, FileType] = {}
@@ -459,8 +470,9 @@ async def run_review(
                     repo_full,
                 )
 
-            collected: List[Dict[str, Any]] = []
-            for _content_key, path_diff_list in diff_to_paths.items():
+            _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)
+
+            async def _process_file(path_diff_list: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
                 path0, file_diff = path_diff_list[0]
 
                 # Skip docs/assets when smart routing is enabled
@@ -471,7 +483,7 @@ async def run_review(
                             "[Smart routing] Skipping LLM review (docs/assets): %s",
                             path0,
                         )
-                        continue
+                        return []
 
                 diff_lines = diff_lines_per_path.get(path0, set())
                 # Semgrep: diff-filtered + critical (ERROR severity) bypass
@@ -547,7 +559,7 @@ async def run_review(
                         len(linter_critical),
                     )
                 file_lines = (path_to_content.get(path0) or "").splitlines()
-                linter_issues_with_snippets: List[Dict[str, Any]] = []
+                linter_issues_with_snippets = []
                 for i in linter_for_llm:
                     line_no = i.get("line")
                     snippet = ""
@@ -580,7 +592,7 @@ async def run_review(
                 if config.VECTOR_DB_ENABLED:
                     try:
                         from src.intelligence.embeddings import get_embeddings
-                        from src.storage.vector_store import search_similar, upsert_chunks
+                        from src.storage.vector_store import search_similar
 
                         logger.debug("[Vector] path=%s: extracting modified functions from diff", path0)
                         mod_funcs = extract_modified_functions(
@@ -612,12 +624,12 @@ async def run_review(
                                     path0, idx + 1, len(func_embeddings), len(matches),
                                 )
                                 all_matches.extend(matches)
-                            seen_hashes: Dict[str, Any] = {}
+                            seen_hashes_inner: Dict[str, Any] = {}
                             for m in all_matches:
-                                if m.content_hash not in seen_hashes or m.score > seen_hashes[m.content_hash].score:
-                                    seen_hashes[m.content_hash] = m
+                                if m.content_hash not in seen_hashes_inner or m.score > seen_hashes_inner[m.content_hash].score:
+                                    seen_hashes_inner[m.content_hash] = m
                             unique_matches = sorted(
-                                seen_hashes.values(), key=lambda m: m.score, reverse=True
+                                seen_hashes_inner.values(), key=lambda m: m.score, reverse=True
                             )[:config.VECTOR_SIMILARITY_TOP_K]
                             logger.debug(
                                 "[Vector] path=%s: after dedupe %d unique match(es), top scores=%s",
@@ -635,15 +647,44 @@ async def run_review(
                     except Exception as e:
                         logger.warning("Vector similarity failed for %s: %s", path0, e)
 
-                try:
-                    comments = await review_file(file_diff, path0, file_pr_context)
-                    for c in comments:
-                        for path, _ in path_diff_list:
-                            collected.append(
-                                {"path": path, "line": c["line"], "body": c["body"]}
-                            )
-                except Exception as e:
-                    logger.warning("review_file failed for %s: %s", path0, e)
+                file_comments: List[Dict[str, Any]] = []
+                async with _review_sem:
+                    try:
+                        comments = await review_file(file_diff, path0, file_pr_context)
+                        for c in comments:
+                            for path, _ in path_diff_list:
+                                file_comments.append(
+                                    {"path": path, "line": c["line"], "body": c["body"]}
+                                )
+                    except Exception as e:
+                        logger.warning("review_file failed for %s: %s", path0, e)
+                    if config.SIFT_LLM_REQUEST_DELAY > 0:
+                        await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
+                return file_comments
+
+            path_diff_lists = list(diff_to_paths.values())
+
+            async def _staggered_process_file(path_diff_list: List[Tuple[str, str]], idx: int) -> List[Dict[str, Any]]:
+                if idx > 0:
+                    await asyncio.sleep(idx * _LLM_TASK_STAGGER)
+                return await _process_file(path_diff_list)
+
+            logger.info(
+                "Reviewing %d unique file diff(s) with max %d concurrent tasks",
+                len(path_diff_lists),
+                config.SIFT_MAX_CONCURRENT_REVIEWS,
+            )
+            results = await asyncio.gather(
+                *[_staggered_process_file(pl, i) for i, pl in enumerate(path_diff_lists)],
+                return_exceptions=True,
+            )
+
+            collected: List[Dict[str, Any]] = []
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning("File review task failed: %s", result)
+                else:
+                    collected.extend(result)
 
             if config.VECTOR_DB_ENABLED and _vector_upsert_queue:
                 try:
@@ -678,36 +719,22 @@ async def run_review(
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
 
-            # Post all inline review comments first (Files changed tab), then the summary (Conversation tab)
-            for item in collected:
-                try:
-                    await github.create_review_comment(
-                        owner,
-                        repo,
-                        pr_number,
-                        commit_id=commit_id,
-                        path=item["path"],
-                        line=item["line"],
-                        body=item["body"],
-                        side="RIGHT",
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to post review comment %s:%s: %s",
-                        item.get("path"),
-                        item.get("line"),
-                        e,
-                    )
-
-            # Summary comment must happen after all review comments
-            comment_id = await github.create_comment(owner, repo, pr_number, summary)
+            # Post all inline comments + summary in a single Reviews API call
+            review_id = await github.create_pull_request_review(
+                owner,
+                repo,
+                pr_number,
+                commit_id=commit_id,
+                body=summary,
+                comments=collected,
+            )
             try:
                 store_review(
                     repo_full,
                     pr_number,
                     installation_id,
                     summary,
-                    comment_id=comment_id,
+                    comment_id=review_id,
                     paths=[p for p, _ in file_chunks],
                 )
             except Exception as e:

@@ -221,6 +221,39 @@ class GitHubClient:
         logger.info("Posted comment on %s/%s PR #%s (id=%s)", owner, repo, pr_number, comment_id)
         return comment_id
 
+    async def create_pull_request_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        commit_id: str,
+        body: str,
+        comments: List[Dict[str, Any]],
+    ) -> int:
+        """Post all inline comments + summary in a single Reviews API call. Returns the review id."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        payload = {
+            "commit_id": commit_id,
+            "body": body,
+            "event": "COMMENT",
+            "comments": [
+                {"path": c["path"], "line": c["line"], "side": "RIGHT", "body": c["body"]}
+                for c in comments
+            ],
+        }
+        r = await self._client.post(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            json=payload,
+        )
+        r.raise_for_status()
+        review_id = r.json()["id"]
+        logger.info(
+            "Posted pull request review on %s/%s PR #%s (id=%s, %d comment(s))",
+            owner, repo, pr_number, review_id, len(comments),
+        )
+        return review_id
+
     async def get_authenticated_user_login(self) -> str:
         """Return the app's login (e.g. slug[bot]) for filtering our comments. Uses GET /app with JWT because GET /user returns 403 for installation tokens."""
         jwt_token = _make_jwt()

@@ -53,6 +53,11 @@ VECTOR_SIMILARITY_TOP_K = int(os.environ.get("VECTOR_SIMILARITY_TOP_K") or "5")
 _VECTOR_EXCLUDE_SAME_FILE_RAW = (os.environ.get("VECTOR_EXCLUDE_SAME_FILE") or "1").strip().lower()
 VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
 
+# Concurrency / rate limiting
+SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") or "10")
+SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
+SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""
