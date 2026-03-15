@@ -13,6 +13,9 @@ GITHUB_APP_PRIVATE_KEY = os.environ.get("GITHUB_APP_PRIVATE_KEY")
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# Optional: bearer token to protect POST /review (GitHub Actions flow); skip auth if unset
+SIFT_API_KEY = os.environ.get("SIFT_API_KEY") or None
+
 # LLM provider (LiteLLM): model string and optional api_base
 LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
 # Only set when explicitly provided (Ollama/Azure); leave None for OpenAI, Anthropic, Gemini, etc.
@@ -65,18 +68,20 @@ SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or
 
 
 def validate_required() -> None:
-    """Fail fast if required env vars are missing."""
-    missing = []
-    if not GITHUB_APP_ID:
-        missing.append("GITHUB_APP_ID")
-    if not GITHUB_APP_PRIVATE_KEY:
-        missing.append("GITHUB_APP_PRIVATE_KEY")
-    if not GITHUB_WEBHOOK_SECRET:
-        missing.append("GITHUB_WEBHOOK_SECRET")
+    """Fail fast if required env vars are missing. GitHub App/webhook vars only warn (GitHub Token mode)."""
+    _log = logging.getLogger("src.config")
     if not DATABASE_URL:
-        missing.append("DATABASE_URL")
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+        raise RuntimeError("Missing required environment variable: DATABASE_URL")
+    for name, value in [
+        ("GITHUB_APP_ID", GITHUB_APP_ID),
+        ("GITHUB_APP_PRIVATE_KEY", GITHUB_APP_PRIVATE_KEY),
+        ("GITHUB_WEBHOOK_SECRET", GITHUB_WEBHOOK_SECRET),
+    ]:
+        if not value:
+            _log.warning(
+                "%s is not set; webhook and GitHub App flows will be disabled (GitHub Token /review flow still works).",
+                name,
+            )
 
 
 def setup_logging() -> None:

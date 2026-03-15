@@ -151,18 +151,27 @@ async def run_review(
     owner: str,
     repo: str,
     pr_number: int,
-    installation_id: int,
+    installation_id: Optional[int] = None,
+    github_token: Optional[str] = None,
     before_sha: Optional[str] = None,
 ) -> None:
     """Run the full review flow: fetch diff, split by file, per-file LLM, summarize, post inline comments + summary, store.
 
+    Provide exactly one of installation_id (GitHub App) or github_token (e.g. GITHUB_TOKEN from Actions).
     When before_sha is set (e.g. for synchronize), reviews only the delta between before_sha and current PR head.
     Logs and swallows exceptions so the webhook response is not affected.
     """
     repo_full = f"{owner}/{repo}"
     try:
-        token = await get_installation_token(installation_id)
-        async with GitHubClient(installation_id, token=token) as github:
+        if github_token:
+            token = github_token
+            _installation_id = 0
+        elif installation_id is not None:
+            token = await get_installation_token(installation_id)
+            _installation_id = installation_id
+        else:
+            raise ValueError("Either installation_id or github_token must be provided")
+        async with GitHubClient(_installation_id, token=token) as github:
             logger.info("Starting review for %s PR #%s", repo_full, pr_number)
 
             diff, pr_context = await get_diff_for_review(
@@ -732,7 +741,7 @@ async def run_review(
                 store_review(
                     repo_full,
                     pr_number,
-                    installation_id,
+                    _installation_id,
                     summary,
                     comment_id=review_id,
                     paths=[p for p, _ in file_chunks],
