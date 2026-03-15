@@ -51,9 +51,9 @@ on:
       GITHUB_WEBHOOK_SECRET:
         required: false
         description: "GitHub webhook secret (optional, for webhook flows)"
-      GITHUB_TOKEN:
+      SIFT_GITHUB_TOKEN:
         required: false
-        description: "GitHub token (for github_token auth; caller often passes secrets.GITHUB_TOKEN)"
+        description: "GitHub token for API/review (caller passes secrets.GITHUB_TOKEN here; name avoids reserved GITHUB_TOKEN collision)"
 
 jobs:
   review:
@@ -63,7 +63,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SIFT_GITHUB_TOKEN }}
 
       - name: Start Sift container
         run: |
@@ -97,7 +97,7 @@ jobs:
           INPUT_BEFORE_SHA: ${{ inputs.before_sha }}
           AUTH_MODE: ${{ inputs.auth_mode }}
           SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
-          GITHUB_TOKEN_BODY: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN_BODY: ${{ secrets.SIFT_GITHUB_TOKEN }}
           SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
         run: |
           OWNER="${INPUT_REPOSITORY%%/*}"
