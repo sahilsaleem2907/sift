@@ -64,9 +64,13 @@ def _handle_pull_request(body: dict, background_tasks: BackgroundTasks) -> Respo
     if not owner or not repo:
         return Response(status_code=200, content="ignored")
 
-    if action in ("opened", "synchronize"):
+    if action in ("opened", "synchronize", "reopened"):
         from src.core.review_engine import run_review
-        background_tasks.add_task(run_review, owner, repo, pr_number, installation_id)
+        before_sha = body.get("before") if action == "synchronize" else None
+        background_tasks.add_task(
+            run_review, owner, repo, pr_number, installation_id,
+            before_sha=before_sha,
+        )
         logger.info("Queued review for %s PR #%s", repo_full_name, pr_number)
         return Response(status_code=202, content="accepted")
 

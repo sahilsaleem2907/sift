@@ -67,19 +67,36 @@ async def get_diff_for_review(
     pr_number: int,
     github_client: GitHubClient,
     include_context: bool = True,
+    before_sha: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Fetch PR diff and optional title/body context via the GitHub client.
+
+    When before_sha is set (e.g. for synchronize), fetches incremental diff between
+    before_sha and current PR head instead of full PR diff.
 
     Returns:
         (diff_text, pr_context or None). pr_context is {"title": str, "body": str} when include_context.
     """
-    diff = await github_client.get_pr_diff(owner, repo, pr_number)
-    logger.info("Fetched diff for %s/%s PR #%s (%d chars)", owner, repo, pr_number, len(diff))
+    details: Optional[Dict[str, Any]] = None
+    if before_sha:
+        details = await github_client.get_pr_details(owner, repo, pr_number)
+        head_sha = details.get("head_sha") or ""
+        if not head_sha:
+            raise ValueError("PR head SHA not found for compare diff")
+        diff = await github_client.get_compare_diff(owner, repo, before_sha, head_sha)
+        logger.info(
+            "Fetched compare diff for %s/%s PR #%s (%s...%s, %d chars)",
+            owner, repo, pr_number, before_sha[:7], head_sha[:7], len(diff),
+        )
+    else:
+        diff = await github_client.get_pr_diff(owner, repo, pr_number)
+        logger.info("Fetched diff for %s/%s PR #%s (%d chars)", owner, repo, pr_number, len(diff))
 
     pr_context: Optional[Dict[str, Any]] = None
     if include_context:
         try:
-            details = await github_client.get_pr_details(owner, repo, pr_number)
+            if details is None:
+                details = await github_client.get_pr_details(owner, repo, pr_number)
             pr_context = {"title": details.get("title") or "", "body": details.get("body") or ""}
         except Exception as e:
             logger.warning("Could not fetch PR details for context: %s", e)

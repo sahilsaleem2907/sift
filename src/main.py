@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from src import config
 from src.api.health import router as health_router
+from src.api.review import router as review_router
 from src.api.webhooks import router as webhooks_router
 
 config.setup_logging()
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sift")
 app.include_router(health_router)
+app.include_router(review_router)
 app.include_router(webhooks_router)
 
 
