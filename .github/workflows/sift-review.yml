@@ -82,6 +82,8 @@ jobs:
             -e SIFT_API_KEY="$SIFT_API_KEY" \
             -e LLM_MODEL="${SIFT_LLM_MODEL:-ollama/llama3.2}" \
             -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
+            -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
+            -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_APP_ID="$SIFT_GITHUB_APP_ID" \
             -e GITHUB_APP_PRIVATE_KEY="$SIFT_GITHUB_PRIVATE_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
