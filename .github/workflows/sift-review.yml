@@ -63,7 +63,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          token: ${{ secrets.SIFT_GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.SIFT_GITHUB_TOKEN }}
 
       - name: Start Sift container
         run: |
