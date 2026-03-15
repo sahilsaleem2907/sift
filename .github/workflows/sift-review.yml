@@ -77,11 +77,6 @@ jobs:
           SIFT_GITHUB_PRIVATE_KEY: ${{ secrets.SIFT_GITHUB_PRIVATE_KEY }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
         run: |
-          IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          if [ -z "$IMAGE" ]; then
-            echo "::error::SIFT_IMAGE secret is required and must be non-empty"
-            exit 1
-          fi
           docker run -d --name sift -p 8000:8000 \
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
             -e SIFT_API_KEY="$SIFT_API_KEY" \
@@ -90,7 +85,7 @@ jobs:
             -e GITHUB_APP_ID="$SIFT_GITHUB_APP_ID" \
             -e GITHUB_APP_PRIVATE_KEY="$SIFT_GITHUB_PRIVATE_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
-            "$IMAGE"
+            "$SIFT_IMAGE"
 
       - name: Health check
         run: |
