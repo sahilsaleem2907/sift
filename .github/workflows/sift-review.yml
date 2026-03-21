@@ -68,16 +68,6 @@ jobs:
             exit 1
           fi
           docker pull "$IMAGE"
-          BACKEND_URL=$(docker image inspect "$IMAGE" --format '{{json .Config.Env}}' | jq -r '.[] | select(test("^SWIFT_API_BACKEND_BASE_URL=")) | sub("^SWIFT_API_BACKEND_BASE_URL="; "")' | head -1)
-          if [ -n "$BACKEND_URL" ]; then
-            echo "SWIFT_API_BACKEND_BASE_URL from image: $BACKEND_URL"
-          else
-            echo "::warning::SWIFT_API_BACKEND_BASE_URL not set in image ENV; container relies on other defaults"
-          fi
-          EXTRA_ENV=()
-          if [ -n "$BACKEND_URL" ]; then
-            EXTRA_ENV+=(-e "SWIFT_API_BACKEND_BASE_URL=$BACKEND_URL")
-          fi
           docker run -d --name sift -p 8000:8000 \
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
             -e SIFT_API_KEY="$SIFT_API_KEY" \
@@ -86,14 +76,7 @@ jobs:
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
-            "${EXTRA_ENV[@]}" \
             "$IMAGE"
-
-      - name: Log SWIFT_API_BACKEND_BASE_URL (from container)
-        run: |
-          echo "SWIFT_API_BACKEND_BASE_URL (resolved inside the Sift container):"
-          docker exec sift printenv SWIFT_API_BACKEND_BASE_URL \
-            || echo "::warning::SWIFT_API_BACKEND_BASE_URL is not set in the container environment"
 
       - name: Health check
         run: |
