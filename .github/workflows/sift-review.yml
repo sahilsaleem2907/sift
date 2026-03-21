@@ -26,7 +26,7 @@ on:
     secrets:
       SIFT_IMAGE:
         required: true
-        description: "GHCR image (e.g. ghcr.io/owner/sift:latest)"
+        description: "Container image (e.g. ghcr.io/owner/sift:latest)"
       SIFT_DATABASE_URL:
         required: true
         description: "PostgreSQL connection string for the container"
@@ -39,12 +39,6 @@ on:
       SIFT_LLM_API_KEY:
         required: false
         description: "LLM provider API key (e.g. OPENAI_API_KEY value)"
-      SIFT_GITHUB_APP_ID:
-        required: false
-        description: "GitHub App ID (for installation_id auth)"
-      SIFT_GITHUB_PRIVATE_KEY:
-        required: false
-        description: "GitHub App private key PEM (for installation_id auth)"
       SIFT_INSTALLATION_ID:
         required: false
         description: "GitHub App installation ID (for installation_id auth)"
@@ -53,19 +47,12 @@ on:
         description: "GitHub webhook secret (optional, for webhook flows)"
       SIFT_GITHUB_TOKEN:
         required: false
-        description: "GitHub token for API/review (caller passes secrets.GITHUB_TOKEN here; name avoids reserved GITHUB_TOKEN collision)"
+        description: "Fallback GitHub token for API/review (used only when not using installation_id auth)"
 
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.SIFT_GITHUB_TOKEN }}
-
       - name: Start Sift container
         env:
           SIFT_IMAGE: ${{ secrets.SIFT_IMAGE }}
@@ -73,8 +60,6 @@ jobs:
           SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
           SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
-          SIFT_GITHUB_APP_ID: ${{ secrets.SIFT_GITHUB_APP_ID }}
-          SIFT_GITHUB_PRIVATE_KEY: ${{ secrets.SIFT_GITHUB_PRIVATE_KEY }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
         run: |
          IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -89,8 +74,6 @@ jobs:
             -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
-            -e GITHUB_APP_ID="$SIFT_GITHUB_APP_ID" \
-            -e GITHUB_APP_PRIVATE_KEY="$SIFT_GITHUB_PRIVATE_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             "$IMAGE"
 

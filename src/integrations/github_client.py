@@ -1,12 +1,10 @@
-"""GitHub API client: App JWT, installation token, PR diff, post comment."""
+"""GitHub API client: installation token, PR diff, post comment."""
 import base64
 import logging
 import re
-import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-import jwt
 
 from src import config
 
@@ -15,32 +13,29 @@ logger = logging.getLogger(__name__)
 GITHUB_API_BASE = "https://api.github.com"
 
 
-def _make_jwt() -> str:
-    """Generate a JWT for the GitHub App (RS256, iat/exp per GitHub docs)."""
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + 600,
-        "iss": config.GITHUB_APP_ID,
-    }
-    key = config.get_github_private_key_bytes()
-    return jwt.encode(payload, key, algorithm="RS256")  # type: ignore[return-value]
-
-
 async def _get_installation_token(installation_id: int) -> str:
-    """Exchange App JWT for an installation access token; cache not implemented (simple)."""
-    token = _make_jwt()
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{GITHUB_API_BASE}/app/installations/{installation_id}/access_tokens",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-            },
-        )
-        r.raise_for_status()
-        data = r.json()
-    return data["token"]
+    """Resolve a GitHub token for an installation via external token service or static fallback."""
+    if config.SWIFT_API_BACKEND_BASE_URL:
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if config.SIFT_API_KEY:
+            headers["Authorization"] = f"Bearer {config.SIFT_API_KEY}"
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{config.SWIFT_API_BACKEND_BASE_URL}/github/installation-token",
+                json={"installation_id": installation_id},
+                headers=headers,
+            )
+            r.raise_for_status()
+            data = r.json()
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("Token service did not return a valid 'token' field")
+        return token
+    if config.SIFT_GITHUB_TOKEN:
+        return config.SIFT_GITHUB_TOKEN
+    raise RuntimeError(
+        "Cannot resolve GitHub token: set SWIFT_API_BACKEND_BASE_URL or SIFT_GITHUB_TOKEN"
+    )
 
 
 class GitHubClient:
@@ -255,22 +250,16 @@ class GitHubClient:
         return review_id
 
     async def get_authenticated_user_login(self) -> str:
-        """Return the app's login (e.g. slug[bot]) for filtering our comments. Uses GET /app with JWT because GET /user returns 403 for installation tokens."""
-        jwt_token = _make_jwt()
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                f"{GITHUB_API_BASE}/app",
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {jwt_token}",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-        slug = (data.get("slug") or "").strip()
-        if not slug:
-            raise ValueError("GET /app did not return slug")
-        return f"{slug}[bot]"
+        """Return the login for the authenticated user/bot."""
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        r = await self._client.get("/user")
+        r.raise_for_status()
+        data = r.json()
+        login = (data.get("login") or "").strip()
+        if not login:
+            raise ValueError("GET /user did not return login")
+        return login
 
     async def get_comment_reactions(
         self, owner: str, repo: str, comment_id: int
