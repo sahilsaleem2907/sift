@@ -62,10 +62,21 @@ jobs:
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
         run: |
-         IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
             echo "::error::SIFT_IMAGE secret is required and must be non-empty"
             exit 1
+          fi
+          docker pull "$IMAGE"
+          BACKEND_URL=$(docker image inspect "$IMAGE" --format '{{json .Config.Env}}' | jq -r '.[] | select(test("^SWIFT_API_BACKEND_BASE_URL=")) | sub("^SWIFT_API_BACKEND_BASE_URL="; "")' | head -1)
+          if [ -n "$BACKEND_URL" ]; then
+            echo "SWIFT_API_BACKEND_BASE_URL from image: $BACKEND_URL"
+          else
+            echo "::warning::SWIFT_API_BACKEND_BASE_URL not set in image ENV; container relies on other defaults"
+          fi
+          EXTRA_ENV=()
+          if [ -n "$BACKEND_URL" ]; then
+            EXTRA_ENV+=(-e "SWIFT_API_BACKEND_BASE_URL=$BACKEND_URL")
           fi
           docker run -d --name sift -p 8000:8000 \
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
@@ -75,6 +86,7 @@ jobs:
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
+            "${EXTRA_ENV[@]}" \
             "$IMAGE"
 
       - name: Log SWIFT_API_BACKEND_BASE_URL (from container)
