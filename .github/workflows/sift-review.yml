@@ -77,6 +77,12 @@ jobs:
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             "$IMAGE"
 
+      - name: Log SWIFT_API_BACKEND_BASE_URL (from container)
+        run: |
+          echo "SWIFT_API_BACKEND_BASE_URL (resolved inside the Sift container):"
+          docker exec sift printenv SWIFT_API_BACKEND_BASE_URL \
+            || echo "::warning::SWIFT_API_BACKEND_BASE_URL is not set in the container environment"
+
       - name: Health check
         run: |
           for i in $(seq 1 30); do

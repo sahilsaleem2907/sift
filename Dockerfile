@@ -22,13 +22,13 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /app
 COPY . .
-ENV SWIFT_API_BACKEND_BASE_URL=https://99b4-122-172-85-82.ngrok-free.app
+ENV SWIFT_API_BACKEND_BASE_URL=https://528a-122-172-85-82.ngrok-free.app
 EXPOSE 8000
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # --- Stage 3: full (slim + CodeQL + all linters via scripts) ---
 FROM slim AS full
-ENV SWIFT_API_BACKEND_BASE_URL=https://99b4-122-172-85-82.ngrok-free.app
+ENV SWIFT_API_BACKEND_BASE_URL=https://528a-122-172-85-82.ngrok-free.app
 ARG CODEQL_BUNDLE_VERSION
 ARG HADOLINT_VERSION
 ARG TFLINT_VERSION
