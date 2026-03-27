@@ -511,7 +511,7 @@ def _summary_severity_and_title(body: str) -> tuple:
 
 
 def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
-    """Build a structured summary: headline, severity count table (badges, non-zero only), per-file issue tables, footer."""
+    """Build a structured summary with alert blocks and collapsible file details."""
     if not comments:
         return "No inline comments for this review."
 
@@ -539,15 +539,51 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         "",
         f"> {total} issue(s) found across {num_files} file(s)",
         "",
-        "| Badge | Count |",
-        "|-------|-------|",
     ]
-    for key, badge in _SEV_META:
-        n = counts.get(key, 0)
-        if n > 0:
-            lines.append(f"| {badge} | {n} |")
+
+    bug_count = counts.get("bug", 0)
+    security_count = counts.get("security", 0)
+    warning_count = counts.get("warning", 0)
+    suggestion_count = counts.get("suggestion", 0)
+
+    if bug_count > 0 or security_count > 0:
+        parts: List[str] = []
+        if bug_count > 0:
+            parts.append(f"{_SEV_BADGE_BY_KEY['bug']} **{bug_count}**")
+        if security_count > 0:
+            parts.append(f"{_SEV_BADGE_BY_KEY['security']} **{security_count}**")
+        blocking_count = bug_count + security_count
+        lines.extend(
+            [
+                "> [!CAUTION]",
+                f"> {' '.join(parts)} - **{blocking_count}** blocking issue(s). Do not merge.",
+                "",
+            ]
+        )
+
+    if warning_count > 0:
+        lines.extend(
+            [
+                "> [!WARNING]",
+                f"> {_SEV_BADGE_BY_KEY['warning']} **{warning_count}** warning issue(s) require attention before merging.",
+                "",
+            ]
+        )
+
+    if suggestion_count > 0:
+        lines.extend(
+            [
+                "> [!TIP]",
+                f"> {_SEV_BADGE_BY_KEY['suggestion']} **{suggestion_count}** suggestion issue(s) available in the Files changed tab.",
+                "",
+            ]
+        )
+
     lines.append("")
     lines.append("---")
+    lines.append("")
+    lines.append("<details>")
+    lines.append(f"<summary>{total} issue(s) across {num_files} file(s) - full breakdown</summary>")
     lines.append("")
     for path in sorted(by_path.keys()):
         items = sorted(by_path[path], key=lambda x: x["line"])
@@ -559,6 +595,8 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
             title_safe = (item["title"] or "").replace("|", ", ").replace("\n", " ")
             lines.append(f"| {item['line']} | {badge} | {title_safe} |")
         lines.append("")
+    lines.append("</details>")
+    lines.append("")
     lines.append("---")
     lines.append("")
     lines.append("*Inline comments with details and suggested fixes are on the Files changed tab.*")

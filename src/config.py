@@ -14,6 +14,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 SIFT_API_KEY = os.environ.get("SIFT_API_KEY") or None
 SWIFT_API_BACKEND_BASE_URL = os.environ.get("SWIFT_API_BACKEND_BASE_URL")
 SIFT_GITHUB_TOKEN = os.environ.get("SIFT_GITHUB_TOKEN") or None
+GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
 # LLM provider (LiteLLM): model string and optional api_base
 LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
