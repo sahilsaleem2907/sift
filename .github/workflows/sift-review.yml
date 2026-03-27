@@ -61,6 +61,7 @@ jobs:
           SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
         run: |
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
@@ -76,6 +77,7 @@ jobs:
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
+            -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
             "$IMAGE"
 
       - name: Health check
