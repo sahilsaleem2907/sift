@@ -150,10 +150,10 @@ def _normalize_comment_body(body: str) -> str:
 # Severity badge markdown (shields.io) for inline comments and summary. Order: bug, security, warning, suggestion.
 _BADGE_STYLE = "for-the-badge"
 _SEV_META = [
-    ("bug", f"![BUG](https://img.shields.io/badge/BUG-FF4444?style={_BADGE_STYLE})"),
-    ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-FF8C00?style={_BADGE_STYLE})"),
-    ("warning", f"![WARNING](https://img.shields.io/badge/WARNING-FFD700?style={_BADGE_STYLE})"),
-    ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-4A90D9?style={_BADGE_STYLE})"),
+    ("bug", f"![BUG](https://img.shields.io/badge/BUG-AA0000?style={_BADGE_STYLE})"),
+    ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-CC5500?style={_BADGE_STYLE})"),
+    ("warning", f"![WARNING](https://img.shields.io/badge/WARNING-B8860B?style={_BADGE_STYLE})"),
+    ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-2E5A8A?style={_BADGE_STYLE})"),
 ]
 _SEV_BADGE_BY_KEY = {key: badge for key, badge in _SEV_META}
 
@@ -582,7 +582,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         lines.extend(
             [
                 "> [!CAUTION]",
-                f"> {' '.join(parts)} - **{blocking_count}** blocking issue(s). Do not merge.",
+                f"> {' '.join(parts)}",
                 "",
             ]
         )
