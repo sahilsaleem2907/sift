@@ -1,0 +1,26 @@
+name: Sift PR Review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  sift:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: sahilsaleem2907/sift/.github/workflows/sift-review.yml@custom/github-actions
+    with:
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+      before_sha: ${{ github.event.before }}
+      auth_mode: installation_id
+    secrets:
+      SIFT_IMAGE: ${{ secrets.SIFT_IMAGE }}
+      SIFT_DATABASE_URL: ${{ secrets.SIFT_DATABASE_URL }}
+      SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
+      SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
+      SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
+      SIFT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
+      SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
