@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from litellm import acompletion
 
@@ -155,6 +156,31 @@ _SEV_META = [
     ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-4A90D9?style={_BADGE_STYLE})"),
 ]
 _SEV_BADGE_BY_KEY = {key: badge for key, badge in _SEV_META}
+
+# Summary-only: shields path label-messageColor with dark labelColor (left) and lighter message (right).
+_SEV_SUMMARY_SPEC: Dict[str, Dict[str, str]] = {
+    "bug": {"label": "BUG", "message_color": "FF4444", "label_color": "AA0000"},
+    "security": {"label": "SECURITY", "message_color": "FF8C00", "label_color": "CC5500"},
+    "warning": {"label": "WARNING", "message_color": "FFD700", "label_color": "B8860B"},
+    "suggestion": {"label": "SUGGESTION", "message_color": "4A90D9", "label_color": "2E5A8A"},
+}
+
+
+def _summary_count_badge_markdown(severity_key: str, count: int) -> str:
+    """Shields.io badge: dark label (labelColor) + count (lighter message color). Summary comment only."""
+    spec = _SEV_SUMMARY_SPEC.get(severity_key, _SEV_SUMMARY_SPEC["suggestion"])
+    label = spec["label"]
+    msg_color = spec["message_color"]
+    lbl_color = spec["label_color"]
+    # Path segments may need encoding for shields (hyphens separate label / message / color).
+    seg_label = quote(label, safe="")
+    seg_msg = str(int(count))
+    seg_color = quote(msg_color, safe="")
+    url = (
+        f"https://img.shields.io/badge/{seg_label}-{seg_msg}-{seg_color}"
+        f"?style={_BADGE_STYLE}&labelColor={lbl_color}"
+    )
+    return f"![{label} {count}]({url})"
 
 
 def _format_structured_comment_body(item: Dict[str, Any]) -> str:
@@ -549,9 +575,9 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     if bug_count > 0 or security_count > 0:
         parts: List[str] = []
         if bug_count > 0:
-            parts.append(f"{_SEV_BADGE_BY_KEY['bug']} **{bug_count}**")
+            parts.append(_summary_count_badge_markdown("bug", bug_count))
         if security_count > 0:
-            parts.append(f"{_SEV_BADGE_BY_KEY['security']} **{security_count}**")
+            parts.append(_summary_count_badge_markdown("security", security_count))
         blocking_count = bug_count + security_count
         lines.extend(
             [
@@ -565,7 +591,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         lines.extend(
             [
                 "> [!WARNING]",
-                f"> {_SEV_BADGE_BY_KEY['warning']} **{warning_count}** warning issue(s) require attention before merging.",
+                f"> {_summary_count_badge_markdown('warning', warning_count)} warning issue(s) require attention before merging.",
                 "",
             ]
         )
@@ -574,7 +600,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         lines.extend(
             [
                 "> [!TIP]",
-                f"> {_SEV_BADGE_BY_KEY['suggestion']} **{suggestion_count}** suggestion issue(s) available in the Files changed tab.",
+                f"> {_summary_count_badge_markdown('suggestion', suggestion_count)} suggestion issue(s) available in the Files changed tab.",
                 "",
             ]
         )
@@ -591,7 +617,8 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         lines.append("| Line | Severity | Issue |")
         lines.append("|------|----------|-------|")
         for item in items:
-            badge = _SEV_BADGE_BY_KEY.get(item["sev"], _SEV_BADGE_BY_KEY["suggestion"])
+            sev_key = item["sev"] if item["sev"] in _SEV_SUMMARY_SPEC else "suggestion"
+            badge = _summary_count_badge_markdown(sev_key, 1)
             title_safe = (item["title"] or "").replace("|", ", ").replace("\n", " ")
             lines.append(f"| {item['line']} | {badge} | {title_safe} |")
         lines.append("")
