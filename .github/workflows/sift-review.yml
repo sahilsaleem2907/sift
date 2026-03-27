@@ -48,6 +48,9 @@ on:
       SIFT_GITHUB_TOKEN:
         required: false
         description: "Fallback GitHub token for API/review (used only when not using installation_id auth)"
+      SWIFT_API_BACKEND_BASE_URL:
+        required: false
+        description: "Base URL for installation token service (Swift backend)"
 
 jobs:
   review:
