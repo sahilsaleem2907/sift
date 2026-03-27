@@ -147,7 +147,7 @@ def _normalize_comment_body(body: str) -> str:
 
 
 # Severity badge markdown (shields.io) for inline comments and summary. Order: bug, security, warning, suggestion.
-_BADGE_STYLE = "plastic"
+_BADGE_STYLE = "for-the-badge"
 _SEV_META = [
     ("bug", f"![BUG](https://img.shields.io/badge/BUG-FF4444?style={_BADGE_STYLE})"),
     ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-FF8C00?style={_BADGE_STYLE})"),

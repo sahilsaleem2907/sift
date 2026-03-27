@@ -255,7 +255,7 @@ async def run_review(
                     tools_set = get_tools_for_file(ft, rl, path)
                     if "linter" in tools_set:
                         linter_paths.add(path)
-                    if "semgrep" in tools_set:
+                    if "semgrep" in tools_set and config.SEMGREP_ENABLED:
                         semgrep_paths.add(path)
                     if "codeql" in tools_set:
                         codeql_paths.add(path)
@@ -290,12 +290,8 @@ async def run_review(
                     "[Smart routing] Running linter on %d path(s): %s",
                     len(linter_input), sorted(linter_input.keys()) if linter_input else [],
                 )
-                logger.debug(
-                    "[Smart routing] Running Semgrep on %d path(s): %s",
-                    len(semgrep_input), sorted(semgrep_input.keys()) if semgrep_input else [],
-                )
             else:
-                semgrep_input = path_to_content
+                semgrep_input = path_to_content if config.SEMGREP_ENABLED else {}
                 linter_input = path_to_content
 
             # Tool result cache: split into cached vs uncached so we only run on misses
@@ -324,9 +320,22 @@ async def run_review(
                 linter_cached, linter_uncached = {}, linter_input
 
             codeql_findings_by_path: Dict[str, List[dict]] = {}
+            run_semgrep_this_pr = config.SEMGREP_ENABLED and (
+                not config.SIFT_SMART_ROUTING_ENABLED or len(semgrep_paths) > 0
+            )
             run_codeql_this_pr = config.CODEQL_ENABLED and (
                 not config.SIFT_SMART_ROUTING_ENABLED or len(codeql_paths) > 0
             )
+            if config.SIFT_SMART_ROUTING_ENABLED and config.SEMGREP_ENABLED:
+                if semgrep_paths:
+                    logger.debug(
+                        "[Smart routing] Running Semgrep on paths: %s",
+                        sorted(semgrep_paths),
+                    )
+                else:
+                    logger.debug(
+                        "[Smart routing] Skipping Semgrep (no matching paths in this PR)",
+                    )
             if config.SIFT_SMART_ROUTING_ENABLED and config.CODEQL_ENABLED:
                 if codeql_paths:
                     logger.debug(
@@ -387,8 +396,13 @@ async def run_review(
                     return {}
                 return await _run_codeql_task()
 
+            async def _semgrep_or_empty() -> Dict[str, List[dict]]:
+                if not run_semgrep_this_pr:
+                    return {}
+                return await asyncio.to_thread(run_semgrep, semgrep_uncached)
+
             semgrep_result, linter_result, codeql_result = await asyncio.gather(
-                asyncio.to_thread(run_semgrep, semgrep_uncached),
+                _semgrep_or_empty(),
                 asyncio.to_thread(run_linters, linter_uncached),
                 _codeql_or_empty(),
                 return_exceptions=True,
@@ -496,7 +510,10 @@ async def run_review(
 
                 diff_lines = diff_lines_per_path.get(path0, set())
                 # Semgrep: diff-filtered + critical (ERROR severity) bypass
-                if config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths:
+                if (
+                    not config.SEMGREP_ENABLED
+                    or (config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths)
+                ):
                     semgrep_for_llm: List[Dict[str, Any]] = []
                 else:
                     all_semgrep = findings_by_path.get(path0, [])

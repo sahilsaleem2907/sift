@@ -24,6 +24,10 @@ LLM_API_BASE = _llm_base.rstrip("/") if _llm_base else None
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+# Semgrep (optional; default enabled)
+_SEMGREP_ENABLED_RAW = (os.environ.get("SEMGREP_ENABLED") or "1").strip().lower()
+SEMGREP_ENABLED = _SEMGREP_ENABLED_RAW in ("1", "true", "yes")
+
 # CodeQL (optional; default disabled)
 _CODEQL_ENABLED_RAW = (os.environ.get("CODEQL_ENABLED") or "0").strip().lower()
 CODEQL_ENABLED = _CODEQL_ENABLED_RAW in ("1", "true", "yes")
