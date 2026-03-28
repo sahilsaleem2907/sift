@@ -60,6 +60,18 @@ on:
       SIFT_EMBEDDING_DIMENSION:
         required: false
         description: "Vector dimension for the HNSW index (must match model output)"
+      SIFT_SEMGREP_ENABLED:
+        required: false
+        description: "SEMGREP_ENABLED — 1/true/yes to run Semgrep (default 1 if unset)"
+      SIFT_CODEQL_ENABLED:
+        required: false
+        description: "CODEQL_ENABLED — 1/true/yes to run CodeQL (default 0 if unset)"
+      SIFT_VECTOR_DB_ENABLED:
+        required: false
+        description: "VECTOR_DB_ENABLED — 1/true/yes for code similarity (default 0 if unset)"
+      SIFT_SMART_ROUTING_ENABLED:
+        required: false
+        description: "SIFT_SMART_ROUTING_ENABLED — 1/true/yes for smart routing (default 1 if unset)"
 
 jobs:
   review:
@@ -77,6 +89,10 @@ jobs:
           SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
           SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
           SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
+          SIFT_SEMGREP_ENABLED: ${{ secrets.SIFT_SEMGREP_ENABLED }}
+          SIFT_CODEQL_ENABLED: ${{ secrets.SIFT_CODEQL_ENABLED }}
+          SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
+          SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
         run: |
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
@@ -93,9 +109,13 @@ jobs:
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
-            -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL:-ollama/nomic-embed-text}" \
-            -e EMBEDDING_API_BASE="${SIFT_EMBEDDING_API_BASE:-http://localhost:11434}" \
-            -e EMBEDDING_DIMENSION="${SIFT_EMBEDDING_DIMENSION:-768}" \
+            -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL}" \
+            -e EMBEDDING_API_BASE="${SIFT_EMBEDDING_API_BASE}" \
+            -e EMBEDDING_DIMENSION="${SIFT_EMBEDDING_DIMENSION}" \
+            -e SEMGREP_ENABLED="${SIFT_SEMGREP_ENABLED:-1}" \
+            -e CODEQL_ENABLED="${SIFT_CODEQL_ENABLED:-0}" \
+            -e VECTOR_DB_ENABLED="${SIFT_VECTOR_DB_ENABLED:-0}" \
+            -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
             "$IMAGE"
 
       - name: Health check
