@@ -51,6 +51,15 @@ on:
       SWIFT_API_BACKEND_BASE_URL:
         required: false
         description: "Base URL for installation token service (Swift backend)"
+      SIFT_EMBEDDING_MODEL:
+        required: false
+        description: "Embedding model string (e.g. ollama/nomic-embed-text)"
+      SIFT_EMBEDDING_API_BASE:
+        required: false
+        description: "Embedding provider API base (e.g. Ollama URL); omit for OpenAI/Gemini defaults"
+      SIFT_EMBEDDING_DIMENSION:
+        required: false
+        description: "Vector dimension for the HNSW index (must match model output)"
 
 jobs:
   review:
@@ -65,6 +74,9 @@ jobs:
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
           SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
+          SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
+          SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
+          SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
         run: |
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
@@ -81,6 +93,9 @@ jobs:
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
+            -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL:-ollama/nomic-embed-text}" \
+            -e EMBEDDING_API_BASE="${SIFT_EMBEDDING_API_BASE:-http://localhost:11434}" \
+            -e EMBEDDING_DIMENSION="${SIFT_EMBEDDING_DIMENSION:-768}" \
             "$IMAGE"
 
       - name: Health check
