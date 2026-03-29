@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 48" role="img" aria-labelledby="title">
+  <title id="title">Sift</title>
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2563eb"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="8" width="32" height="32" rx="8" fill="url(#g)"/>
+  <path fill="#fff" d="M14 16h12v3H14zm0 6.5h12v3H14zm0 6.5h8v3h-8z" opacity=".95"/>
+  <text x="48" y="33" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="700" fill="#0f172a">Sift</text>
+</svg>
