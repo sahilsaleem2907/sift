@@ -244,7 +244,11 @@ def get_avg_quality_score_for_path_pattern(repo: str, path_prefix: str) -> Optio
 
 
 def get_review_by_repo_pr(repo: str, pr_number: int) -> Optional[tuple[int, Optional[int]]]:
-    """Get the most recent review for this repo+pr. Returns (review_id, comment_id) or None.
+    """Get the most recent review for this repo+pr.
+
+    Returns (db_review_id, summary_comment_id) or None, where summary_comment_id is the GitHub
+    issue-comment id created for the PR summary ("Conversation" tab).
+
     Returns plain values so callers (e.g. background tasks) do not hold a detached ORM instance."""
     with session_scope() as session:
         stmt = (

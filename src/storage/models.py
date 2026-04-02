@@ -21,6 +21,7 @@ class Review(Base):
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
     installation_id: Mapped[int] = mapped_column(Integer, nullable=False)
     review_body: Mapped[str] = mapped_column(Text, nullable=False)
+    # GitHub issue comment id created for the PR summary (conversation/feedback sync).
     comment_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

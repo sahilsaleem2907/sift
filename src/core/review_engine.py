@@ -745,13 +745,16 @@ async def run_review(
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
 
-            # Post all inline comments + summary in a single Reviews API call
+            # Post summary as a PR issue comment so reactions can be fetched via
+            # GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions.
+            # Inline comments remain posted via the Reviews API (Files changed tab).
+            summary_comment_id = await github.create_comment(owner, repo, pr_number, summary)
             review_id = await github.create_pull_request_review(
                 owner,
                 repo,
                 pr_number,
                 commit_id=commit_id,
-                body=summary,
+                body="",
                 comments=collected,
             )
             try:
@@ -760,7 +763,7 @@ async def run_review(
                     pr_number,
                     _installation_id,
                     summary,
-                    comment_id=review_id,
+                    comment_id=summary_comment_id,
                     paths=[p for p, _ in file_chunks],
                 )
             except Exception as e:

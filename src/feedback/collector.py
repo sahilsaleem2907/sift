@@ -49,11 +49,11 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
     if not review_data or review_data[1] is None:
         logger.debug("No review with comment_id for %s PR #%s", repo_full, pr_number)
         return
-    review_id, summary_comment_id = review_data
+    db_review_id, summary_comment_id = review_data
     try:
         token = await get_installation_token(installation_id)
         async with GitHubClient(installation_id, token=token) as github:
-            # Summary comment (Conversation tab)
+            # Summary is an issue comment created via POST /issues/{pr_number}/comments.
             reactions = await github.get_comment_reactions(owner, repo, summary_comment_id)
             for r in reactions:
                 user = r.get("user") or {}
@@ -67,16 +67,33 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                     comment_id=summary_comment_id,
                     actor=actor,
                     reaction_content=content,
-                    review_id=review_id,
+                    review_id=db_review_id,
                     is_inline_comment=False,
                 )
                 if stored:
                     logger.info("Stored reaction %s by %s on %s PR #%s (summary)", content, actor, repo_full, pr_number)
 
-            # Inline comments (Files changed): filter to ours by app login
-            app_login = await github.get_authenticated_user_login()
+            # Inline comments (Files changed):
+            # Prefer filtering to Sift's bot login, but some installation tokens may be forbidden from GET /user (403).
+            # In that case, fall back to unfiltered inline comments so reactions can still be captured.
             all_inline = await github.list_pull_request_review_comments(owner, repo, pr_number)
-            our_inline_ids = [c["id"] for c in all_inline if (c.get("user") or {}).get("login") == app_login]
+            try:
+                app_login = await github.get_authenticated_user_login()
+            except Exception as e:
+                logger.warning(
+                    "Inline reaction sync: GET /user failed (falling back to unfiltered inline comments): %s",
+                    e,
+                )
+                app_login = None
+
+            if app_login:
+                our_inline_ids = [
+                    c["id"]
+                    for c in all_inline
+                    if (c.get("user") or {}).get("login") == app_login
+                ]
+            else:
+                our_inline_ids = [c["id"] for c in all_inline]
             for inline_comment_id in our_inline_ids:
                 try:
                     inline_reactions = await github.get_review_comment_reactions(owner, repo, inline_comment_id)
@@ -95,7 +112,7 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                         comment_id=inline_comment_id,
                         actor=actor,
                         reaction_content=content,
-                        review_id=review_id,
+                        review_id=db_review_id,
                         is_inline_comment=True,
                     )
                     if stored:
