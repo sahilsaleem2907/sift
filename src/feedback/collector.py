@@ -43,17 +43,43 @@ def _normalize_reaction_content(content: str) -> Optional[str]:
     return c if c in allowed else None
 
 
-async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installation_id: int) -> None:
-    """Fetch reactions for the summary comment and our inline comments on this PR; store new ones (dedup)."""
+async def sync_reactions_for_pr(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    installation_id: Optional[int] = None,
+    github_token: Optional[str] = None,
+) -> None:
+    """Fetch reactions for the summary comment and our inline comments on this PR; store new ones (dedup).
+
+    Provide exactly one of ``installation_id`` (GitHub App webhook flow) or ``github_token`` (e.g. GITHUB_TOKEN in Actions).
+    """
+    if not github_token and installation_id is None:
+        logger.warning("sync_reactions_for_pr: need installation_id or github_token for %s/%s PR #%s", owner, repo, pr_number)
+        return
+    if github_token and installation_id is not None:
+        logger.warning("sync_reactions_for_pr: pass only one of installation_id or github_token")
+        return
+
     repo_full = f"{owner}/{repo}"
     review_data = get_review_by_repo_pr(repo_full, pr_number)
     if not review_data or review_data[1] is None:
-        logger.debug("No review with comment_id for %s PR #%s", repo_full, pr_number)
+        logger.info(
+            "Feedback sync skipped for %s PR #%s (no review with comment_id in DB)",
+            repo_full,
+            pr_number,
+        )
         return
     db_review_id, summary_comment_id = review_data
     try:
-        token = await get_installation_token(installation_id)
-        async with GitHubClient(installation_id, token=token) as github:
+        if github_token:
+            token = github_token
+            gh_install_id = 0
+        else:
+            assert installation_id is not None
+            token = await get_installation_token(installation_id)
+            gh_install_id = installation_id
+        async with GitHubClient(gh_install_id, token=token) as github:
             # Summary is an issue comment created via POST /issues/{pr_number}/comments.
             reactions = await github.get_comment_reactions(owner, repo, summary_comment_id)
             for r in reactions:
@@ -131,5 +157,6 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                     )
                     if stored:
                         logger.info("Stored reaction %s by %s on %s PR #%s (inline)", content, actor, repo_full, pr_number)
+            logger.info("Feedback sync completed for %s PR #%s", repo_full, pr_number)
     except Exception as e:
         logger.warning("Reaction sync failed for %s PR #%s: %s", repo_full, pr_number, e)
