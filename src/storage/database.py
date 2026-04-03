@@ -5,13 +5,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Generator, List, Optional
 
-from sqlalchemy import create_engine, or_, select, text
+from sqlalchemy import case, create_engine, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from src import config
-from src.storage.models import Base, FeedbackEvent, Review, ReviewFile, ToolResultCache
+from src.storage.models import Base, FeedbackEvent, Review, ReviewComment, ReviewFile, ToolResultCache
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,223 @@ def get_feedback_events_for_pr(repo: str, pr_number: int) -> List[FeedbackEvent]
             .order_by(FeedbackEvent.created_at)
         )
         return list(session.execute(stmt).scalars().all())
+
+
+def get_repo_feedback_summary(repo: str) -> Dict[str, int]:
+    """Aggregate feedback signals for a repo (reactions + /feedback commands).
+
+    Positive reactions: +1, heart, hooray, rocket (inline vs summary via is_inline_comment).
+    Negative reactions: -1, confused.
+    Commands: helpful / not_helpful (repo-wide, not split by inline).
+    """
+    positive_reactions = frozenset({"+1", "heart", "hooray", "rocket"})
+    negative_reactions = frozenset({"-1", "confused"})
+
+    inline_positive = 0
+    inline_negative = 0
+    summary_positive = 0
+    summary_negative = 0
+    helpful_commands = 0
+    not_helpful_commands = 0
+
+    with session_scope() as session:
+        stmt = (
+            select(FeedbackEvent)
+            .where(
+                FeedbackEvent.repo == repo,
+                FeedbackEvent.event_type.in_(("reaction", "command")),
+            )
+            .order_by(FeedbackEvent.created_at)
+        )
+        rows = list(session.execute(stmt).scalars().all())
+
+    for ev in rows:
+        if ev.event_type == "command":
+            if ev.command == "helpful":
+                helpful_commands += 1
+            elif ev.command == "not_helpful":
+                not_helpful_commands += 1
+            continue
+        if ev.event_type != "reaction" or not ev.reaction_content:
+            continue
+        c = ev.reaction_content
+        is_inline = bool(ev.is_inline_comment)
+        if c in positive_reactions:
+            if is_inline:
+                inline_positive += 1
+            else:
+                summary_positive += 1
+        elif c in negative_reactions:
+            if is_inline:
+                inline_negative += 1
+            else:
+                summary_negative += 1
+
+    total_events = (
+        inline_positive
+        + inline_negative
+        + summary_positive
+        + summary_negative
+        + helpful_commands
+        + not_helpful_commands
+    )
+
+    return {
+        "inline_positive": inline_positive,
+        "inline_negative": inline_negative,
+        "summary_positive": summary_positive,
+        "summary_negative": summary_negative,
+        "helpful_commands": helpful_commands,
+        "not_helpful_commands": not_helpful_commands,
+        "total_events": total_events,
+    }
+
+
+def upsert_review_comment(
+    comment_id: int,
+    review_id: Optional[int],
+    repo: str,
+    severity: str,
+    title: Optional[str],
+) -> None:
+    """Insert or refresh inline comment metadata (severity/title) on each reaction sync."""
+    sev = (severity or "suggestion").lower()[:32]
+    if sev not in ("bug", "security", "warning", "suggestion"):
+        sev = "suggestion"
+    t = title
+    if t and len(t) > 256:
+        t = t[:253] + "..."
+    ins = pg_insert(ReviewComment).values(
+        comment_id=comment_id,
+        review_id=review_id,
+        repo=repo,
+        severity=sev,
+        title=t,
+    )
+    stmt = ins.on_conflict_do_update(
+        index_elements=["comment_id"],
+        set_={
+            "severity": ins.excluded.severity,
+            "title": ins.excluded.title,
+            "review_id": ins.excluded.review_id,
+            "repo": ins.excluded.repo,
+        },
+    )
+    with session_scope() as session:
+        session.execute(stmt)
+
+
+_MIN_SEVERITY_REACTIONS = 3
+
+
+def get_severity_feedback_summary(repo: str) -> Dict[str, Dict[str, int]]:
+    """Net reaction signal per severity for inline comments with known labels.
+
+    Joins feedback_events (inline reactions) to review_comments. Only includes
+    severities with at least _MIN_SEVERITY_REACTIONS total counted reactions.
+    """
+    positive_reactions = frozenset({"+1", "heart", "hooray", "rocket"})
+    negative_reactions = frozenset({"-1", "confused"})
+
+    with session_scope() as session:
+        stmt = (
+            select(FeedbackEvent.reaction_content, ReviewComment.severity)
+            .join(ReviewComment, FeedbackEvent.comment_id == ReviewComment.comment_id)
+            .where(
+                FeedbackEvent.repo == repo,
+                FeedbackEvent.event_type == "reaction",
+                FeedbackEvent.is_inline_comment.is_(True),
+                FeedbackEvent.comment_id.isnot(None),
+            )
+        )
+        rows = session.execute(stmt).all()
+
+    buckets: Dict[str, Dict[str, int]] = {}
+    for reaction_content, severity in rows:
+        if not reaction_content or not severity:
+            continue
+        c = reaction_content
+        if c in positive_reactions:
+            key = "positive"
+        elif c in negative_reactions:
+            key = "negative"
+        else:
+            continue
+        sev = severity.lower()
+        if sev not in ("bug", "security", "warning", "suggestion"):
+            sev = "suggestion"
+        if sev not in buckets:
+            buckets[sev] = {"positive": 0, "negative": 0}
+        buckets[sev][key] += 1
+
+    out: Dict[str, Dict[str, int]] = {}
+    for sev, counts in buckets.items():
+        pos = counts["positive"]
+        neg = counts["negative"]
+        total = pos + neg
+        if total < _MIN_SEVERITY_REACTIONS:
+            continue
+        net = pos - neg
+        out[sev] = {"positive": pos, "negative": neg, "net": net}
+    return out
+
+
+def get_repo_feedback_comment_examples(repo: str, limit: int = 15) -> List[Dict[str, Any]]:
+    """Inline comments with stored severity/title plus aggregated reaction counts.
+
+    Ordered by total reactions (then by |net|) so the LLM sees the strongest signals first.
+    """
+    positive_reactions = ("+1", "heart", "hooray", "rocket")
+    negative_reactions = ("-1", "confused")
+
+    reaction_agg = (
+        select(
+            FeedbackEvent.comment_id.label("comment_id"),
+            func.sum(
+                case((FeedbackEvent.reaction_content.in_(positive_reactions), 1), else_=0)
+            ).label("positive"),
+            func.sum(
+                case((FeedbackEvent.reaction_content.in_(negative_reactions), 1), else_=0)
+            ).label("negative"),
+        )
+        .where(
+            FeedbackEvent.repo == repo,
+            FeedbackEvent.event_type == "reaction",
+            FeedbackEvent.is_inline_comment.is_(True),
+            FeedbackEvent.comment_id.isnot(None),
+        )
+        .group_by(FeedbackEvent.comment_id)
+    ).subquery()
+
+    total_rx = reaction_agg.c.positive + reaction_agg.c.negative
+    net_expr = reaction_agg.c.positive - reaction_agg.c.negative
+
+    stmt = (
+        select(
+            ReviewComment.severity,
+            ReviewComment.title,
+            reaction_agg.c.positive,
+            reaction_agg.c.negative,
+        )
+        .join(reaction_agg, ReviewComment.comment_id == reaction_agg.c.comment_id)
+        .where(ReviewComment.repo == repo)
+        .where(total_rx > 0)
+        .order_by(total_rx.desc(), func.abs(net_expr).desc())
+        .limit(limit)
+    )
+
+    out: List[Dict[str, Any]] = []
+    with session_scope() as session:
+        for row in session.execute(stmt).all():
+            sev, title, pos, neg = row[0], row[1], int(row[2] or 0), int(row[3] or 0)
+            out.append({
+                "severity": sev or "suggestion",
+                "title": title,
+                "positive": pos,
+                "negative": neg,
+                "net": pos - neg,
+            })
+    return out
 
 
 def get_review_ids_for_path_pattern(repo: str, path_prefix: str) -> List[int]:

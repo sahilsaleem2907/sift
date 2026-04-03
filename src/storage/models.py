@@ -38,6 +38,20 @@ class ReviewFile(Base):
     path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
 
 
+class ReviewComment(Base):
+    """One row per inline review comment (GitHub); severity parsed from body at sync time."""
+
+    __tablename__ = "review_comments"
+
+    comment_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    review_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("reviews.id"), nullable=True, index=True
+    )
+    repo: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+
+
 class FeedbackEvent(Base):
     """Single feedback event (reaction or /feedback command)."""
 

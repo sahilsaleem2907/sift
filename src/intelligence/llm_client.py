@@ -47,6 +47,66 @@ SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few se
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*(.*)")
 _SUMMARY_SHIELD_RE = re.compile(r"^!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*(.*)", re.DOTALL)
+# Same shields/text badges anywhere in body (merged comments: "**Issues:**\n- ![BADGE]...")
+_SHIELD_ANYWHERE_RE = re.compile(
+    r"!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*([^\n]*)",
+    re.IGNORECASE,
+)
+_TEXT_BADGE_ANYWHERE_RE = re.compile(
+    r"\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*([^\n]*)",
+    re.IGNORECASE,
+)
+# GitHub may return HTML; badge alt text is often the severity label only.
+_HTML_IMG_ALT_SEV_RE = re.compile(
+    r'<img[^>]+alt=["\'](BUG|SECURITY|WARNING|SUGGESTION)["\']',
+    re.IGNORECASE,
+)
+
+_SEVERITY_RANK = {"bug": 0, "security": 1, "warning": 2, "suggestion": 3}
+
+
+def _strip_merge_issues_header(text: str) -> str:
+    """Remove leading **Issues:** line (merged multi-issue comments) so badges parse reliably."""
+    t = text.strip().lstrip("\ufeff")
+    t = re.sub(r"^\*\*Issues:\*\*\s*\n?", "", t, count=1, flags=re.IGNORECASE)
+    t = re.sub(r"^-\s*\*\*Issues:\*\*\s*\n?", "", t, count=1, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def _is_placeholder_issue_title(title: str) -> bool:
+    """True if title is only a merge header / noise, not a real issue title."""
+    if not title or not title.strip():
+        return True
+    t = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", title)
+    s = t.strip().strip("*").strip("_").strip()
+    low = re.sub(r"\*+", "", s).lower().strip().rstrip(":").strip()
+    return low in ("issues", "issue", "issues:", "issue:")
+
+
+def _parse_issues_from_comment_body(text: str) -> List[tuple[str, str]]:
+    """Extract (severity, title_fragment) from all shield/text badges in a comment body."""
+    text = _strip_merge_issues_header(text)
+    issues: List[tuple[str, str]] = []
+    for m in _SHIELD_ANYWHERE_RE.finditer(text):
+        sev = m.group(1).lower()
+        title = (m.group(2) or "").strip()
+        title = re.sub(r"^\s*[-*]\s+", "", title).strip("*").strip()
+        if _is_placeholder_issue_title(title):
+            title = ""
+        issues.append((sev, title))
+    if not issues:
+        for m in _TEXT_BADGE_ANYWHERE_RE.finditer(text):
+            sev = m.group(1).lower()
+            title = (m.group(2) or "").strip().split("\n")[0].strip()
+            title = re.sub(r"^\s*[-*]\s+", "", title).strip("*").strip()
+            if _is_placeholder_issue_title(title):
+                title = ""
+            issues.append((sev, title))
+    if not issues and "<img" in text.lower():
+        # Fallback: HTML bodies (no markdown ![]() in body)
+        for m in _HTML_IMG_ALT_SEV_RE.finditer(text):
+            issues.append((m.group(1).lower(), ""))
+    return issues
 
 # Hunk header for unified diff: @@ -old_start[,old_count] +new_start[,new_count] @@
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -405,6 +465,11 @@ def _format_codeql_findings(findings: List[Dict[str, Any]]) -> str:
     return "CodeQL findings for this file (consider in your review):\n" + "\n".join(lines)
 
 
+def _format_repo_preferences(prefs_text: str) -> str:
+    """Wrap repo-level feedback preferences for the user prompt (same section style as other blocks)."""
+    return (prefs_text or "").strip()
+
+
 def _format_similar_snippets(matches: List[Any]) -> str:
     """Format vector-similarity matches into an LLM-friendly context block."""
     if not matches:
@@ -476,6 +541,12 @@ async def review_file(
         if title or body:
             user_parts.append(f"PR title: {title}\n\nPR description: {body}")
 
+    labeled_comments = (pr_context or {}).get("repo_feedback_labeled_comments")
+    if labeled_comments:
+        lc_block = _format_repo_preferences(labeled_comments)
+        if lc_block:
+            user_parts.append(lc_block)
+
     diff_intro = (
         f"File: {path}\n\n"
         "Diff (legend: '-' = old/removed, '+' = new/added). Each added line is annotated with [L<n>] — use that integer as \"line\" in your JSON."
@@ -517,23 +588,41 @@ async def review_file(
     return _parse_review_file_response(raw, path)
 
 
-def _summary_severity_and_title(body: str) -> tuple:
-    """Extract (severity_key, title) from comment body. severity_key is lowercase for counting."""
+def extract_comment_severity_and_title(body: str) -> tuple:
+    """Extract (severity_key, title) from inline/summary comment body (badges anywhere).
+
+    Merged comments (multiple shields after **Issues:**) use the highest severity as primary
+    and join non-empty titles with " · ".
+    """
     if not body or not body.strip():
         return ("suggestion", "")
     text = body.strip()
+    issues = _parse_issues_from_comment_body(text)
+    if issues:
+        primary_sev = min(issues, key=lambda x: _SEVERITY_RANK.get(x[0], 9))[0]
+        titles = [t for _, t in issues if t]
+        composite = " · ".join(titles) if titles else ""
+        if not composite:
+            distinct = sorted({s for s, _ in issues}, key=lambda x: _SEVERITY_RANK.get(x, 9))
+            composite = f"({len(issues)} issue(s): {', '.join(distinct)})" if len(distinct) > 1 else ""
+        if not composite:
+            composite = primary_sev
+        if len(composite) > 256:
+            composite = composite[:253] + "..."
+        if _is_placeholder_issue_title(composite):
+            composite = ""
+        return (primary_sev, composite)
+
     m = _SUMMARY_SHIELD_RE.match(text)
     if m:
         return (m.group(1).lower(), (m.group(2) or "").strip().split("\n")[0].strip())
     m = _SUMMARY_SEVERITY_RE.match(text)
     if m:
         return (m.group(1).lower(), (m.group(2) or "").strip().split("\n")[0].strip())
-    # Merged comments: "**Issues:**\n- badge ..." or first shield in body
-    if "**Issues:**" in text or "!(" in text:
-        m2 = _SUMMARY_SHIELD_RE.search(text) or _SUMMARY_SEVERITY_RE.search(text)
-        if m2:
-            return (m2.group(1).lower(), (m2.group(2) or "").strip().split("\n")[0].strip())
-    return ("suggestion", text.split("\n")[0].strip() if text else "")
+    first = text.split("\n")[0].strip()
+    if first.lower() in ("**issues:**", "## issues", "### issues") or _is_placeholder_issue_title(first):
+        return ("suggestion", "")
+    return ("suggestion", first)
 
 
 def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
@@ -549,7 +638,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
         body = (c.get("body") or "").strip()
         if not body:
             continue
-        sev, title = _summary_severity_and_title(body)
+        sev, title = extract_comment_severity_and_title(body)
         counts[sev] = counts.get(sev, 0) + 1
         by_path.setdefault(path, []).append({
             "line": line,

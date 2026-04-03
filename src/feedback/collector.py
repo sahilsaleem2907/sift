@@ -5,7 +5,8 @@ from typing import Optional
 
 from src.feedback.enums import FeedbackCommand, ReactionContent
 from src.integrations.github_client import GitHubClient, get_installation_token
-from src.storage.database import get_review_by_repo_pr, store_reaction_event_if_new
+from src.intelligence.llm_client import extract_comment_severity_and_title
+from src.storage.database import get_review_by_repo_pr, store_reaction_event_if_new, upsert_review_comment
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,20 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                 ]
             else:
                 our_inline_ids = [c["id"] for c in all_inline]
+            comment_body_by_id = {c["id"]: c.get("body") or "" for c in all_inline}
             for inline_comment_id in our_inline_ids:
+                body = comment_body_by_id.get(inline_comment_id, "")
+                severity, title = extract_comment_severity_and_title(body)
+                try:
+                    upsert_review_comment(
+                        inline_comment_id,
+                        db_review_id,
+                        repo_full,
+                        severity,
+                        title or None,
+                    )
+                except Exception as e:
+                    logger.debug("upsert_review_comment failed for %s: %s", inline_comment_id, e)
                 try:
                     inline_reactions = await github.get_review_comment_reactions(owner, repo, inline_comment_id)
                 except Exception as e:

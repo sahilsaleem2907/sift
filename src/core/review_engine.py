@@ -22,9 +22,11 @@ from src.core.analysis_routing import (
 )
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from src.intelligence.ast.function_extract import extract_modified_functions
+from src.feedback.preferences import format_labeled_comment_examples
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import (
     get_avg_quality_score_for_path_pattern,
+    get_repo_feedback_comment_examples,
     get_tool_cache_hits,
     store_review,
     store_tool_cache,
@@ -202,6 +204,10 @@ async def run_review(
 
             fetch_results = await asyncio.gather(*[_fetch_file(p) for p, _ in file_chunks])
             path_to_content = {p: c for p, c in fetch_results if c is not None}
+
+            _labeled_comments_text = format_labeled_comment_examples(
+                get_repo_feedback_comment_examples(repo_full)
+            )
 
             # Smart routing: classify and score each path; build tool path sets
             path_to_file_type: Dict[str, FileType] = {}
@@ -561,11 +567,6 @@ async def run_review(
                         len(semgrep_for_llm),
                         len(codeql_for_llm),
                     )
-                file_pr_context: Dict[str, Any] = {
-                    **(pr_context or {}),
-                    "semgrep_findings": semgrep_for_llm,
-                    "codeql_findings": codeql_for_llm,
-                }
 
                 raw_linter_list = linter_issues_by_path.get(path0, []) if (not config.SIFT_SMART_ROUTING_ENABLED or path0 in linter_paths) else []
                 raw_linter_count = len(raw_linter_list)
@@ -613,6 +614,7 @@ async def run_review(
                         "ranges": expanded_ranges,
                         "content": file_content,
                     },
+                    "repo_feedback_labeled_comments": _labeled_comments_text or None,
                 }
 
                 if config.VECTOR_DB_ENABLED:
