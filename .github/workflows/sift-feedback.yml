@@ -142,35 +142,93 @@ jobs:
           SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
           GITHUB_TOKEN_DEFAULT: ${{ github.token }}
         run: |
+          set -eo pipefail
           OWNER="${INPUT_REPOSITORY%%/*}"
           REPO="${INPUT_REPOSITORY#*/}"
           AUTH_HEADER=""
-          if [ -n "$SIFT_API_KEY" ]; then
+          if [ -n "${SIFT_API_KEY:-}" ]; then
             AUTH_HEADER="Authorization: Bearer $SIFT_API_KEY"
           fi
-          if [ "$AUTH_MODE" = "installation_id" ] && [ -n "$SIFT_INSTALLATION_ID" ]; then
+
+          SIFT_GH="${SIFT_GITHUB_TOKEN:-}"
+          GHD="${GITHUB_TOKEN_DEFAULT:-}"
+          echo "::group::Feedback sync diagnostics"
+          echo "repository=$INPUT_REPOSITORY owner=$OWNER repo=$REPO"
+          echo "pr_number=$INPUT_PR_NUMBER merged=$INPUT_MERGED"
+          echo "AUTH_MODE=$AUTH_MODE"
+          echo "SIFT_API_KEY set: $([ -n "${SIFT_API_KEY:-}" ] && echo yes || echo no)"
+          echo "SIFT_INSTALLATION_ID set: $([ -n "${SIFT_INSTALLATION_ID:-}" ] && echo yes || echo no)"
+          echo "SIFT_GITHUB_TOKEN length: ${#SIFT_GH}"
+          echo "GITHUB_TOKEN_DEFAULT length: ${#GHD}"
+          echo "(Exit 22 from curl -f means HTTP 4xx/5xx; this step now prints status + body.)"
+          echo "::endgroup::"
+
+          if [ "$AUTH_MODE" = "installation_id" ] && [ -n "${SIFT_INSTALLATION_ID:-}" ]; then
             BODY=$(jq -n \
               --arg owner "$OWNER" \
               --arg repo "$REPO" \
               --argjson pr_number "$INPUT_PR_NUMBER" \
               --argjson merged "$INPUT_MERGED" \
               --argjson installation_id "$SIFT_INSTALLATION_ID" \
-              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, installation_id: $installation_id}')
+              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, installation_id: $installation_id}') \
+              || { echo "::error::jq failed building BODY (installation_id). Check merged/pr_number are valid JSON."; exit 1; }
           else
             GH_TOKEN="${SIFT_GITHUB_TOKEN:-$GITHUB_TOKEN_DEFAULT}"
+            if [ -z "$GH_TOKEN" ]; then
+              echo "::error::No GitHub token: set secrets.SIFT_GITHUB_TOKEN or pass github.token to the workflow"
+              exit 1
+            fi
             BODY=$(jq -n \
               --arg owner "$OWNER" \
               --arg repo "$REPO" \
               --argjson pr_number "$INPUT_PR_NUMBER" \
               --argjson merged "$INPUT_MERGED" \
               --arg github_token "$GH_TOKEN" \
-              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, github_token: $github_token}')
+              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, github_token: $github_token}') \
+              || { echo "::error::jq failed building BODY (github_token). Check merged/pr_number are valid JSON."; exit 1; }
           fi
+
+          echo "::group::Feedback request (redacted)"
+          echo "$BODY" | jq -c '
+            if .github_token then .github_token = ("<redacted len=" + ((.github_token | length) | tostring) + ">")
+            elif has("installation_id") then .installation_id = "<redacted>"
+            else . end
+          '
+          echo "::endgroup::"
+
+          echo "POST http://localhost:8000/feedback …"
+          CURL_EXIT=0
+          CURL_RAW=""
           if [ -n "$AUTH_HEADER" ]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "$AUTH_HEADER" -d "$BODY" http://localhost:8000/feedback
+            CURL_RAW=$(curl -sS -w "\n%{http_code}" \
+              -X POST -H "Content-Type: application/json" -H "$AUTH_HEADER" \
+              -d "$BODY" http://localhost:8000/feedback) || CURL_EXIT=$?
           else
-            curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" http://localhost:8000/feedback
+            CURL_RAW=$(curl -sS -w "\n%{http_code}" \
+              -X POST -H "Content-Type: application/json" \
+              -d "$BODY" http://localhost:8000/feedback) || CURL_EXIT=$?
           fi
+          HTTP_CODE=$(printf '%s' "$CURL_RAW" | tail -n1)
+          FEEDBACK_RESP=$(printf '%s' "$CURL_RAW" | sed '$d')
+
+          echo "::group::Feedback response"
+          echo "curl exit: $CURL_EXIT"
+          echo "HTTP status: ${HTTP_CODE:-<empty>}"
+          echo "Response body:"
+          echo "$FEEDBACK_RESP"
+          echo "::endgroup::"
+
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::error::curl failed (exit $CURL_EXIT). Is the container listening on :8000?"
+            exit 1
+          fi
+          case "${HTTP_CODE:-}" in
+            2[0-9][0-9]) ;;
+            *)
+              echo "::error::POST /feedback failed (HTTP ${HTTP_CODE:-unknown}). See response body and diagnostics above."
+              exit 1
+              ;;
+          esac
 
       - name: Wait for feedback sync completion
         run: |
