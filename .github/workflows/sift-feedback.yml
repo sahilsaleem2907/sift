@@ -73,11 +73,6 @@ on:
         required: false
         description: "SIFT_SMART_ROUTING_ENABLED — 1/true/yes for smart routing (default 1 if unset)"
 
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
-
 jobs:
   feedback:
     runs-on: ubuntu-latest
