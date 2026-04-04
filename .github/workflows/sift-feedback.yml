@@ -1,0 +1,188 @@
+# Reusable workflow: sync PR reactions into Sift DB after close/merge (GitHub Actions path).
+# Client repos add a workflow on pull_request (types: [closed]) that calls this.
+# Reactions are read via GitHub API; default auth uses the caller's ${{ github.token }}.
+name: Sift Feedback
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: "Repository full name (owner/repo)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number"
+        required: true
+        type: number
+      merged:
+        description: "Whether the PR was merged (github.event.pull_request.merged)"
+        required: true
+        type: boolean
+      auth_mode:
+        description: "Auth for GitHub API: github_token or installation_id"
+        required: false
+        type: string
+        default: "github_token"
+    secrets:
+      SIFT_IMAGE:
+        required: true
+        description: "Container image (e.g. ghcr.io/owner/sift:latest)"
+      SIFT_DATABASE_URL:
+        required: true
+        description: "PostgreSQL connection string for the container"
+      SIFT_API_KEY:
+        required: false
+        description: "Bearer token for POST /feedback (optional)"
+      SIFT_LLM_MODEL:
+        required: false
+        description: "LLM model string (e.g. ollama/llama3.2)"
+      SIFT_LLM_API_KEY:
+        required: false
+        description: "LLM provider API key (e.g. OPENAI_API_KEY value)"
+      SIFT_INSTALLATION_ID:
+        required: false
+        description: "GitHub App installation ID (for installation_id auth)"
+      GITHUB_WEBHOOK_SECRET:
+        required: false
+        description: "GitHub webhook secret (optional, for webhook flows)"
+      SIFT_GITHUB_TOKEN:
+        required: false
+        description: "GitHub PAT for API when auth_mode is github_token and not using GITHUB_TOKEN secret passthrough"
+      SWIFT_API_BACKEND_BASE_URL:
+        required: false
+        description: "Base URL for installation token service (Swift backend)"
+      SIFT_EMBEDDING_MODEL:
+        required: false
+        description: "Embedding model string (e.g. ollama/nomic-embed-text)"
+      SIFT_EMBEDDING_API_BASE:
+        required: false
+        description: "Embedding provider API base (e.g. Ollama URL); omit for OpenAI/Gemini defaults"
+      SIFT_EMBEDDING_DIMENSION:
+        required: false
+        description: "Vector dimension for the HNSW index (must match model output)"
+      SIFT_SEMGREP_ENABLED:
+        required: false
+        description: "SEMGREP_ENABLED — 1/true/yes to run Semgrep (default 1 if unset)"
+      SIFT_CODEQL_ENABLED:
+        required: false
+        description: "CODEQL_ENABLED — 1/true/yes to run CodeQL (default 0 if unset)"
+      SIFT_VECTOR_DB_ENABLED:
+        required: false
+        description: "VECTOR_DB_ENABLED — 1/true/yes for code similarity (default 0 if unset)"
+      SIFT_SMART_ROUTING_ENABLED:
+        required: false
+        description: "SIFT_SMART_ROUTING_ENABLED — 1/true/yes for smart routing (default 1 if unset)"
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  feedback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Sift container
+        env:
+          SIFT_IMAGE: ${{ secrets.SIFT_IMAGE }}
+          SIFT_DATABASE_URL: ${{ secrets.SIFT_DATABASE_URL }}
+          SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
+          SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
+          SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
+          SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
+          SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
+          SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
+          SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
+          SIFT_SEMGREP_ENABLED: ${{ secrets.SIFT_SEMGREP_ENABLED }}
+          SIFT_CODEQL_ENABLED: ${{ secrets.SIFT_CODEQL_ENABLED }}
+          SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
+          SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
+        run: |
+          IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          if [ -z "$IMAGE" ]; then
+            echo "::error::SIFT_IMAGE secret is required and must be non-empty"
+            exit 1
+          fi
+          docker pull "$IMAGE"
+          docker run -d --name sift -p 8000:8000 \
+            -e DATABASE_URL="$SIFT_DATABASE_URL" \
+            -e SIFT_API_KEY="$SIFT_API_KEY" \
+            -e LLM_MODEL="${SIFT_LLM_MODEL:-ollama/llama3.2}" \
+            -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
+            -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
+            -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
+            -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
+            -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
+            -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL}" \
+            -e EMBEDDING_API_BASE="${SIFT_EMBEDDING_API_BASE}" \
+            -e EMBEDDING_DIMENSION="${SIFT_EMBEDDING_DIMENSION}" \
+            -e SEMGREP_ENABLED="${SIFT_SEMGREP_ENABLED:-1}" \
+            -e CODEQL_ENABLED="${SIFT_CODEQL_ENABLED:-0}" \
+            -e VECTOR_DB_ENABLED="${SIFT_VECTOR_DB_ENABLED:-0}" \
+            -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
+            "$IMAGE"
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health | jq -e '.status == "ok"' >/dev/null 2>&1; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Waiting for Sift... ($i/30)"
+            sleep 2
+          done
+          echo "Health check timed out"
+          exit 1
+
+      - name: Trigger feedback sync
+        env:
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_MERGED: ${{ inputs.merged }}
+          AUTH_MODE: ${{ inputs.auth_mode }}
+          SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
+          SIFT_GITHUB_TOKEN: ${{ secrets.SIFT_GITHUB_TOKEN }}
+          SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
+          GITHUB_TOKEN_DEFAULT: ${{ github.token }}
+        run: |
+          OWNER="${INPUT_REPOSITORY%%/*}"
+          REPO="${INPUT_REPOSITORY#*/}"
+          AUTH_HEADER=""
+          if [ -n "$SIFT_API_KEY" ]; then
+            AUTH_HEADER="Authorization: Bearer $SIFT_API_KEY"
+          fi
+          if [ "$AUTH_MODE" = "installation_id" ] && [ -n "$SIFT_INSTALLATION_ID" ]; then
+            BODY=$(jq -n \
+              --arg owner "$OWNER" \
+              --arg repo "$REPO" \
+              --argjson pr_number "$INPUT_PR_NUMBER" \
+              --argjson merged "$INPUT_MERGED" \
+              --argjson installation_id "$SIFT_INSTALLATION_ID" \
+              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, installation_id: $installation_id}')
+          else
+            GH_TOKEN="${SIFT_GITHUB_TOKEN:-$GITHUB_TOKEN_DEFAULT}"
+            BODY=$(jq -n \
+              --arg owner "$OWNER" \
+              --arg repo "$REPO" \
+              --argjson pr_number "$INPUT_PR_NUMBER" \
+              --argjson merged "$INPUT_MERGED" \
+              --arg github_token "$GH_TOKEN" \
+              '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, github_token: $github_token}')
+          fi
+          if [ -n "$AUTH_HEADER" ]; then
+            curl -sf -X POST -H "Content-Type: application/json" -H "$AUTH_HEADER" -d "$BODY" http://localhost:8000/feedback
+          else
+            curl -sf -X POST -H "Content-Type: application/json" -d "$BODY" http://localhost:8000/feedback
+          fi
+
+      - name: Wait for feedback sync completion
+        run: |
+          timeout 300 bash -c 'until docker logs sift 2>&1 | grep -qE "Feedback sync completed|Feedback sync skipped|Reaction sync failed"; do sleep 2; done' || true
+
+      - name: Stop container
+        if: always()
+        run: |
+          docker stop sift 2>/dev/null || true
+          docker rm -f sift 2>/dev/null || true

@@ -270,6 +270,15 @@ class GitHubClient:
             headers={"Accept": "application/vnd.github+json"},
         )
 
+    async def get_pull_request_review_reactions(
+        self, owner: str, repo: str, pr_number: int, review_id: int
+    ) -> list:
+        """List reactions on a pull request review summary (from POST .../pulls/{n}/reviews)."""
+        return await self._paginate_get(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/reactions",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+
     async def list_pull_request_review_comments(
         self, owner: str, repo: str, pr_number: int
     ) -> list:
