@@ -22,9 +22,11 @@ from src.core.analysis_routing import (
 )
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from src.intelligence.ast.function_extract import extract_modified_functions
+from src.feedback.preferences import format_labeled_comment_examples
 from src.intelligence.llm_client import review_file, summarize_review
 from src.storage.database import (
     get_avg_quality_score_for_path_pattern,
+    get_repo_feedback_comment_examples,
     get_tool_cache_hits,
     store_review,
     store_tool_cache,
@@ -203,6 +205,10 @@ async def run_review(
             fetch_results = await asyncio.gather(*[_fetch_file(p) for p, _ in file_chunks])
             path_to_content = {p: c for p, c in fetch_results if c is not None}
 
+            _labeled_comments_text = format_labeled_comment_examples(
+                get_repo_feedback_comment_examples(repo_full)
+            )
+
             # Smart routing: classify and score each path; build tool path sets
             path_to_file_type: Dict[str, FileType] = {}
             path_to_risk: Dict[str, Any] = {}  # RiskLevel
@@ -255,7 +261,7 @@ async def run_review(
                     tools_set = get_tools_for_file(ft, rl, path)
                     if "linter" in tools_set:
                         linter_paths.add(path)
-                    if "semgrep" in tools_set:
+                    if "semgrep" in tools_set and config.SEMGREP_ENABLED:
                         semgrep_paths.add(path)
                     if "codeql" in tools_set:
                         codeql_paths.add(path)
@@ -290,12 +296,8 @@ async def run_review(
                     "[Smart routing] Running linter on %d path(s): %s",
                     len(linter_input), sorted(linter_input.keys()) if linter_input else [],
                 )
-                logger.debug(
-                    "[Smart routing] Running Semgrep on %d path(s): %s",
-                    len(semgrep_input), sorted(semgrep_input.keys()) if semgrep_input else [],
-                )
             else:
-                semgrep_input = path_to_content
+                semgrep_input = path_to_content if config.SEMGREP_ENABLED else {}
                 linter_input = path_to_content
 
             # Tool result cache: split into cached vs uncached so we only run on misses
@@ -324,9 +326,22 @@ async def run_review(
                 linter_cached, linter_uncached = {}, linter_input
 
             codeql_findings_by_path: Dict[str, List[dict]] = {}
+            run_semgrep_this_pr = config.SEMGREP_ENABLED and (
+                not config.SIFT_SMART_ROUTING_ENABLED or len(semgrep_paths) > 0
+            )
             run_codeql_this_pr = config.CODEQL_ENABLED and (
                 not config.SIFT_SMART_ROUTING_ENABLED or len(codeql_paths) > 0
             )
+            if config.SIFT_SMART_ROUTING_ENABLED and config.SEMGREP_ENABLED:
+                if semgrep_paths:
+                    logger.debug(
+                        "[Smart routing] Running Semgrep on paths: %s",
+                        sorted(semgrep_paths),
+                    )
+                else:
+                    logger.debug(
+                        "[Smart routing] Skipping Semgrep (no matching paths in this PR)",
+                    )
             if config.SIFT_SMART_ROUTING_ENABLED and config.CODEQL_ENABLED:
                 if codeql_paths:
                     logger.debug(
@@ -387,8 +402,13 @@ async def run_review(
                     return {}
                 return await _run_codeql_task()
 
+            async def _semgrep_or_empty() -> Dict[str, List[dict]]:
+                if not run_semgrep_this_pr:
+                    return {}
+                return await asyncio.to_thread(run_semgrep, semgrep_uncached)
+
             semgrep_result, linter_result, codeql_result = await asyncio.gather(
-                asyncio.to_thread(run_semgrep, semgrep_uncached),
+                _semgrep_or_empty(),
                 asyncio.to_thread(run_linters, linter_uncached),
                 _codeql_or_empty(),
                 return_exceptions=True,
@@ -496,7 +516,10 @@ async def run_review(
 
                 diff_lines = diff_lines_per_path.get(path0, set())
                 # Semgrep: diff-filtered + critical (ERROR severity) bypass
-                if config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths:
+                if (
+                    not config.SEMGREP_ENABLED
+                    or (config.SIFT_SMART_ROUTING_ENABLED and path0 not in semgrep_paths)
+                ):
                     semgrep_for_llm: List[Dict[str, Any]] = []
                 else:
                     all_semgrep = findings_by_path.get(path0, [])
@@ -544,11 +567,6 @@ async def run_review(
                         len(semgrep_for_llm),
                         len(codeql_for_llm),
                     )
-                file_pr_context: Dict[str, Any] = {
-                    **(pr_context or {}),
-                    "semgrep_findings": semgrep_for_llm,
-                    "codeql_findings": codeql_for_llm,
-                }
 
                 raw_linter_list = linter_issues_by_path.get(path0, []) if (not config.SIFT_SMART_ROUTING_ENABLED or path0 in linter_paths) else []
                 raw_linter_count = len(raw_linter_list)
@@ -596,6 +614,7 @@ async def run_review(
                         "ranges": expanded_ranges,
                         "content": file_content,
                     },
+                    "repo_feedback_labeled_comments": _labeled_comments_text or None,
                 }
 
                 if config.VECTOR_DB_ENABLED:
@@ -728,13 +747,16 @@ async def run_review(
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
 
-            # Post all inline comments + summary in a single Reviews API call
+            # Post summary as a PR issue comment so reactions can be fetched via
+            # GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions.
+            # Inline comments remain posted via the Reviews API (Files changed tab).
+            summary_comment_id = await github.create_comment(owner, repo, pr_number, summary)
             review_id = await github.create_pull_request_review(
                 owner,
                 repo,
                 pr_number,
                 commit_id=commit_id,
-                body=summary,
+                body="",
                 comments=collected,
             )
             try:
@@ -743,7 +765,7 @@ async def run_review(
                     pr_number,
                     _installation_id,
                     summary,
-                    comment_id=review_id,
+                    comment_id=summary_comment_id,
                     paths=[p for p, _ in file_chunks],
                 )
             except Exception as e:

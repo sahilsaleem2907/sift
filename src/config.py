@@ -8,13 +8,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Required
-GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID")
-GITHUB_APP_PRIVATE_KEY = os.environ.get("GITHUB_APP_PRIVATE_KEY")
-GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Optional: bearer token to protect POST /review (GitHub Actions flow); skip auth if unset
+# Optional: bearer token to protect POST /review (GitHub Actions flow) and authenticate to token service; skip auth if unset
 SIFT_API_KEY = os.environ.get("SIFT_API_KEY") or None
+SWIFT_API_BACKEND_BASE_URL = os.environ.get("SWIFT_API_BACKEND_BASE_URL")
+SIFT_GITHUB_TOKEN = os.environ.get("SIFT_GITHUB_TOKEN") or None
+GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
 # LLM provider (LiteLLM): model string and optional api_base
 LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
@@ -24,6 +24,10 @@ LLM_API_BASE = _llm_base.rstrip("/") if _llm_base else None
 
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+# Semgrep (optional; default enabled)
+_SEMGREP_ENABLED_RAW = (os.environ.get("SEMGREP_ENABLED") or "1").strip().lower()
+SEMGREP_ENABLED = _SEMGREP_ENABLED_RAW in ("1", "true", "yes")
 
 # CodeQL (optional; default disabled)
 _CODEQL_ENABLED_RAW = (os.environ.get("CODEQL_ENABLED") or "0").strip().lower()
@@ -44,8 +48,8 @@ _TOOL_CACHE_RAW = (os.environ.get("TOOL_CACHE_ENABLED") or "1").strip().lower()
 TOOL_CACHE_ENABLED = _TOOL_CACHE_RAW in ("1", "true", "yes")
 TOOL_CACHE_TTL_HOURS = int(os.environ.get("TOOL_CACHE_TTL_HOURS") or "24")
 
-# Smart analysis routing (optional; default disabled)
-_SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "0").strip().lower()
+# Smart analysis routing (optional; default enabled)
+_SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "1").strip().lower()
 SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
 
 # Vector DB / code similarity (optional; default disabled)
@@ -68,20 +72,15 @@ SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or
 
 
 def validate_required() -> None:
-    """Fail fast if required env vars are missing. GitHub App/webhook vars only warn (GitHub Token mode)."""
+    """Fail fast if required env vars are missing."""
     _log = logging.getLogger("src.config")
     if not DATABASE_URL:
         raise RuntimeError("Missing required environment variable: DATABASE_URL")
-    for name, value in [
-        ("GITHUB_APP_ID", GITHUB_APP_ID),
-        ("GITHUB_APP_PRIVATE_KEY", GITHUB_APP_PRIVATE_KEY),
-        ("GITHUB_WEBHOOK_SECRET", GITHUB_WEBHOOK_SECRET),
-    ]:
-        if not value:
-            _log.warning(
-                "%s is not set; webhook and GitHub App flows will be disabled (GitHub Token /review flow still works).",
-                name,
-            )
+    if not SWIFT_API_BACKEND_BASE_URL and not SIFT_GITHUB_TOKEN:
+        _log.warning(
+            "Neither SWIFT_API_BACKEND_BASE_URL nor SIFT_GITHUB_TOKEN is set; "
+            "GitHub integration will not work for installation_id auth mode."
+        )
 
 
 def setup_logging() -> None:
@@ -94,13 +93,3 @@ def setup_logging() -> None:
     )
 
 
-def get_github_private_key_bytes() -> bytes:
-    """Return GitHub App private key as bytes (from env or file path)."""
-    raw = GITHUB_APP_PRIVATE_KEY or ""
-    raw = raw.strip()
-    if raw.startswith("-----BEGIN"):
-        return raw.encode("utf-8")
-    path = Path(raw)
-    if path.exists():
-        return path.read_bytes()
-    raise FileNotFoundError(f"GITHUB_APP_PRIVATE_KEY is not PEM and path does not exist: {raw}")

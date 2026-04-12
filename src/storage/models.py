@@ -21,6 +21,7 @@ class Review(Base):
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
     installation_id: Mapped[int] = mapped_column(Integer, nullable=False)
     review_body: Mapped[str] = mapped_column(Text, nullable=False)
+    # GitHub issue comment id created for the PR summary (conversation/feedback sync).
     comment_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -35,6 +36,20 @@ class ReviewFile(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     review_id: Mapped[int] = mapped_column(Integer, ForeignKey("reviews.id"), nullable=False, index=True)
     path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+
+
+class ReviewComment(Base):
+    """One row per inline review comment (GitHub); severity parsed from body at sync time."""
+
+    __tablename__ = "review_comments"
+
+    comment_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    review_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("reviews.id"), nullable=True, index=True
+    )
+    repo: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
 
 class FeedbackEvent(Base):

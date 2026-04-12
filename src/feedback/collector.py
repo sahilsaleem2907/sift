@@ -5,7 +5,8 @@ from typing import Optional
 
 from src.feedback.enums import FeedbackCommand, ReactionContent
 from src.integrations.github_client import GitHubClient, get_installation_token
-from src.storage.database import get_review_by_repo_pr, store_reaction_event_if_new
+from src.intelligence.llm_client import extract_comment_severity_and_title
+from src.storage.database import get_review_by_repo_pr, store_reaction_event_if_new, upsert_review_comment
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +43,44 @@ def _normalize_reaction_content(content: str) -> Optional[str]:
     return c if c in allowed else None
 
 
-async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installation_id: int) -> None:
-    """Fetch reactions for the summary comment and our inline comments on this PR; store new ones (dedup)."""
+async def sync_reactions_for_pr(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    installation_id: Optional[int] = None,
+    github_token: Optional[str] = None,
+) -> None:
+    """Fetch reactions for the summary comment and our inline comments on this PR; store new ones (dedup).
+
+    Provide exactly one of ``installation_id`` (GitHub App webhook flow) or ``github_token`` (e.g. GITHUB_TOKEN in Actions).
+    """
+    if not github_token and installation_id is None:
+        logger.warning("sync_reactions_for_pr: need installation_id or github_token for %s/%s PR #%s", owner, repo, pr_number)
+        return
+    if github_token and installation_id is not None:
+        logger.warning("sync_reactions_for_pr: pass only one of installation_id or github_token")
+        return
+
     repo_full = f"{owner}/{repo}"
     review_data = get_review_by_repo_pr(repo_full, pr_number)
     if not review_data or review_data[1] is None:
-        logger.debug("No review with comment_id for %s PR #%s", repo_full, pr_number)
+        logger.info(
+            "Feedback sync skipped for %s PR #%s (no review with comment_id in DB)",
+            repo_full,
+            pr_number,
+        )
         return
-    review_id, summary_comment_id = review_data
+    db_review_id, summary_comment_id = review_data
     try:
-        token = await get_installation_token(installation_id)
-        async with GitHubClient(installation_id, token=token) as github:
-            # Summary comment (Conversation tab)
+        if github_token:
+            token = github_token
+            gh_install_id = 0
+        else:
+            assert installation_id is not None
+            token = await get_installation_token(installation_id)
+            gh_install_id = installation_id
+        async with GitHubClient(gh_install_id, token=token) as github:
+            # Summary is an issue comment created via POST /issues/{pr_number}/comments.
             reactions = await github.get_comment_reactions(owner, repo, summary_comment_id)
             for r in reactions:
                 user = r.get("user") or {}
@@ -67,17 +94,47 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                     comment_id=summary_comment_id,
                     actor=actor,
                     reaction_content=content,
-                    review_id=review_id,
+                    review_id=db_review_id,
                     is_inline_comment=False,
                 )
                 if stored:
                     logger.info("Stored reaction %s by %s on %s PR #%s (summary)", content, actor, repo_full, pr_number)
 
-            # Inline comments (Files changed): filter to ours by app login
-            app_login = await github.get_authenticated_user_login()
+            # Inline comments (Files changed):
+            # Prefer filtering to Sift's bot login, but some installation tokens may be forbidden from GET /user (403).
+            # In that case, fall back to unfiltered inline comments so reactions can still be captured.
             all_inline = await github.list_pull_request_review_comments(owner, repo, pr_number)
-            our_inline_ids = [c["id"] for c in all_inline if (c.get("user") or {}).get("login") == app_login]
+            try:
+                app_login = await github.get_authenticated_user_login()
+            except Exception as e:
+                logger.warning(
+                    "Inline reaction sync: GET /user failed (falling back to unfiltered inline comments): %s",
+                    e,
+                )
+                app_login = None
+
+            if app_login:
+                our_inline_ids = [
+                    c["id"]
+                    for c in all_inline
+                    if (c.get("user") or {}).get("login") == app_login
+                ]
+            else:
+                our_inline_ids = [c["id"] for c in all_inline]
+            comment_body_by_id = {c["id"]: c.get("body") or "" for c in all_inline}
             for inline_comment_id in our_inline_ids:
+                body = comment_body_by_id.get(inline_comment_id, "")
+                severity, title = extract_comment_severity_and_title(body)
+                try:
+                    upsert_review_comment(
+                        inline_comment_id,
+                        db_review_id,
+                        repo_full,
+                        severity,
+                        title or None,
+                    )
+                except Exception as e:
+                    logger.debug("upsert_review_comment failed for %s: %s", inline_comment_id, e)
                 try:
                     inline_reactions = await github.get_review_comment_reactions(owner, repo, inline_comment_id)
                 except Exception as e:
@@ -95,10 +152,11 @@ async def sync_reactions_for_pr(owner: str, repo: str, pr_number: int, installat
                         comment_id=inline_comment_id,
                         actor=actor,
                         reaction_content=content,
-                        review_id=review_id,
+                        review_id=db_review_id,
                         is_inline_comment=True,
                     )
                     if stored:
                         logger.info("Stored reaction %s by %s on %s PR #%s (inline)", content, actor, repo_full, pr_number)
+            logger.info("Feedback sync completed for %s PR #%s", repo_full, pr_number)
     except Exception as e:
         logger.warning("Reaction sync failed for %s PR #%s: %s", repo_full, pr_number, e)
