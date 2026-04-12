@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sahilsaleem2907/sift"><img src="https://img.shields.io/github/stars/sahilsaleem2907/sift?style=flat-square" alt="GitHub stars"/></a>
-  <img src="https://img.shields.io/badge/python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12"/>
-  <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI"/>
-  <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"/>
-  <a href="https://github.com/sahilsaleem2907/sift/pkgs/container/sift"><img src="https://img.shields.io/badge/GHCR-package-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Container Registry"/></a>
-  <img src="https://img.shields.io/badge/open%20source-%E2%9C%93-22c55e?style=flat-square" alt="Open source"/>
+  <!-- <a href="https://github.com/sahilsaleem2907/sift"><img src="https://img.shields.io/github/stars/sahilsaleem2907/sift?style=for-the-badge" alt="GitHub stars"/></a> -->
+  <img src="https://img.shields.io/badge/python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12"/>
+  <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"/>
+  <a href="https://github.com/sahilsaleem2907/sift/pkgs/container/sift"><img src="https://img.shields.io/badge/GHCR-package-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Container Registry"/></a>
+  <img src="https://img.shields.io/badge/open%20source-%E2%9C%93-22c55e?style=for-the-badge" alt="Open source"/>
 </p>
 
 # Sift
@@ -21,8 +21,8 @@
 
 | Path | Use when |
 |------|----------|
-| **[Website](https://YOUR_WEBSITE)** (replace with your URL) | You want a guided UI to configure Sift and related settings. |
-| **[Documentation](https://YOUR_DOCS)** (replace with your URL) | You want the full reference for options, API, and operations. |
+| **[Website](https://www.sift-agent.com/)** | You want a guided UI to configure Sift and related settings. |
+| **[Documentation](https://www.sift-agent.com/docs)** | You want the full reference for options, API, and operations. |
 | **This repository** | You prefer to self-host from source, build images yourself, or integrate manually. |
 
 ---
