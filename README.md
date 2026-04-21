@@ -88,7 +88,7 @@ uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
 This repo ships a **reusable workflow** that pulls your container image, runs it with secrets, waits for `/health`, then calls `POST /review`. See [.github/workflows/sift-review.yml](.github/workflows/sift-review.yml).
 
-Required secrets for the workflow include **`SIFT_IMAGE`** and **`SIFT_DATABASE_URL`**; others (API keys, LLM, GitHub App installation, etc.) are optional depending on your auth mode. Client repositories call this workflow with `workflow_call` on `pull_request` events.
+Required secrets for the workflow include **`SIFT_IMAGE`** and **`SIFT_DATABASE_URL`**; others (API keys, **`SIFT_LLM_MODEL`** / **`SIFT_LLM_API_KEY`** / **`SIFT_LLM_API_BASE`** for LiteLLM, GitHub App installation, etc.) are optional depending on your auth mode. Set **`SIFT_LLM_API_BASE`** when your model needs a custom endpoint (for example `ollama/...` or Azure OpenAI). Client repositories call this workflow with `workflow_call` on `pull_request` events.
 
 ---
 

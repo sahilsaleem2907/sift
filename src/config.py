@@ -18,8 +18,9 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
 # LLM provider (LiteLLM): model string and optional api_base
 LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
-# Only set when explicitly provided (Ollama/Azure); leave None for OpenAI, Anthropic, Gemini, etc.
-_llm_base = os.environ.get("LLM_API_BASE")
+# Custom base URL for any LiteLLM provider that needs it (e.g. Ollama, Azure OpenAI, self-hosted
+# gateways). Prefer LLM_API_BASE; else SIFT_LLM_API_BASE (GitHub Actions secret passthrough).
+_llm_base = (os.environ.get("LLM_API_BASE") or "").strip() or (os.environ.get("SIFT_LLM_API_BASE") or "").strip()
 LLM_API_BASE = _llm_base.rstrip("/") if _llm_base else None
 
 # Logging

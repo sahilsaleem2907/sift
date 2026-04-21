@@ -39,6 +39,9 @@ on:
       SIFT_LLM_API_KEY:
         required: false
         description: "LLM provider API key (e.g. OPENAI_API_KEY value)"
+      SIFT_LLM_API_BASE:
+        required: false
+        description: "LiteLLM chat API base URL (often required for ollama/...; also Azure OpenAI, self-hosted OpenAI-compatible APIs)"
       SIFT_INSTALLATION_ID:
         required: false
         description: "GitHub App installation ID (for installation_id auth)"
@@ -84,6 +87,7 @@ jobs:
           SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
           SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
+          SIFT_LLM_API_BASE: ${{ secrets.SIFT_LLM_API_BASE }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
           SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
           SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
@@ -107,6 +111,7 @@ jobs:
             -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
+            -e LLM_API_BASE="${SIFT_LLM_API_BASE}" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
             -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL}" \
