@@ -117,4 +117,4 @@ Issues and pull requests are welcome on [GitHub](https://github.com/sahilsaleem2
 
 ## License
 
-This project is intended to be open source. Add a `LICENSE` file at the repository root when you choose a specific license, then you can add a matching badge to this README.
+This project is intended to be fully open source. 
