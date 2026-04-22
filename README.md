@@ -117,4 +117,4 @@ Issues and pull requests are welcome on [GitHub](https://github.com/sahilsaleem2
 
 ## License
 
-This project is intended to be fully open source. 
+This project is licensed under the [MIT License](LICENSE).
