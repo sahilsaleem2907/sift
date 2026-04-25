@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+ENV SWIFT_API_BACKEND_BASE_URL="https://api.sift-agent.com"
 WORKDIR /app
 COPY . .
 EXPOSE 8000

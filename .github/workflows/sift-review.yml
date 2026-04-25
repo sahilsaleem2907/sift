@@ -53,7 +53,7 @@ on:
         description: "Fallback GitHub token for API/review (used only when not using installation_id auth)"
       SWIFT_API_BACKEND_BASE_URL:
         required: false
-        description: "Base URL for installation token service (Swift backend)"
+        description: "Optional override for SWIFT_API_BACKEND_BASE_URL (image default is used when omitted)"
       SIFT_EMBEDDING_MODEL:
         required: false
         description: "Embedding model string (e.g. ollama/nomic-embed-text)"
@@ -103,6 +103,10 @@ jobs:
             echo "::error::SIFT_IMAGE secret is required and must be non-empty"
             exit 1
           fi
+          SWIFT_ENV_ARGS=()
+          if [ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ]; then
+            SWIFT_ENV_ARGS=(-e "SWIFT_API_BACKEND_BASE_URL=$SWIFT_API_BACKEND_BASE_URL")
+          fi
           docker pull "$IMAGE"
           docker run -d --name sift -p 8000:8000 \
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
@@ -113,7 +117,6 @@ jobs:
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
             -e LLM_API_BASE="${SIFT_LLM_API_BASE}" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
-            -e SWIFT_API_BACKEND_BASE_URL="$SWIFT_API_BACKEND_BASE_URL" \
             -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL}" \
             -e EMBEDDING_API_BASE="${SIFT_EMBEDDING_API_BASE}" \
             -e EMBEDDING_DIMENSION="${SIFT_EMBEDDING_DIMENSION}" \
@@ -121,6 +124,7 @@ jobs:
             -e CODEQL_ENABLED="${SIFT_CODEQL_ENABLED:-0}" \
             -e VECTOR_DB_ENABLED="${SIFT_VECTOR_DB_ENABLED:-0}" \
             -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
+            "${SWIFT_ENV_ARGS[@]}" \
             "$IMAGE"
 
       - name: Health check
