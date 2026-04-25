@@ -98,16 +98,40 @@ jobs:
           SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
           SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
         run: |
+          set -eo pipefail
+          echo "::group::Feedback start diagnostics"
+          echo "repository=${{ inputs.repository }}"
+          echo "pr_number=${{ inputs.pr_number }}"
+          echo "merged=${{ inputs.merged }}"
+          echo "auth_mode=${{ inputs.auth_mode }}"
+          echo "SIFT_API_KEY set: $([ -n "${SIFT_API_KEY:-}" ] && echo yes || echo no)"
+          echo "SIFT_LLM_MODEL set: $([ -n "${SIFT_LLM_MODEL:-}" ] && echo yes || echo no)"
+          echo "SIFT_LLM_API_BASE set: $([ -n "${SIFT_LLM_API_BASE:-}" ] && echo yes || echo no)"
+          echo "SIFT_LLM_API_KEY length: ${#SIFT_LLM_API_KEY}"
+          echo "SIFT_EMBEDDING_MODEL set: $([ -n "${SIFT_EMBEDDING_MODEL:-}" ] && echo yes || echo no)"
+          echo "SIFT_EMBEDDING_API_BASE set: $([ -n "${SIFT_EMBEDDING_API_BASE:-}" ] && echo yes || echo no)"
+          echo "SIFT_EMBEDDING_DIMENSION=${SIFT_EMBEDDING_DIMENSION:-<unset>}"
+          echo "SIFT_SEMGREP_ENABLED=${SIFT_SEMGREP_ENABLED:-1}"
+          echo "SIFT_CODEQL_ENABLED=${SIFT_CODEQL_ENABLED:-0}"
+          echo "SIFT_VECTOR_DB_ENABLED=${SIFT_VECTOR_DB_ENABLED:-0}"
+          echo "SIFT_SMART_ROUTING_ENABLED=${SIFT_SMART_ROUTING_ENABLED:-1}"
+          echo "SWIFT_API_BACKEND_BASE_URL set: $([ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ] && echo yes || echo no)"
+          echo "::endgroup::"
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
+            echo "❌ SIFT_IMAGE secret is required and must be non-empty"
             echo "::error::SIFT_IMAGE secret is required and must be non-empty"
             exit 1
           fi
+          echo "✅ Normalized image: $IMAGE"
           SWIFT_ENV_ARGS=()
           if [ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ]; then
             SWIFT_ENV_ARGS=(-e "SWIFT_API_BACKEND_BASE_URL=$SWIFT_API_BACKEND_BASE_URL")
           fi
+          echo "Starting docker pull for image: $IMAGE"
           docker pull "$IMAGE"
+          echo "✅ docker pull completed"
+          echo "Starting docker run for sift container"
           docker run -d --name sift -p 8000:8000 \
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
             -e SIFT_API_KEY="$SIFT_API_KEY" \
@@ -126,18 +150,29 @@ jobs:
             -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
             "${SWIFT_ENV_ARGS[@]}" \
             "$IMAGE"
+          echo "✅ docker run completed"
+          echo "::group::Container startup snapshot"
+          docker ps --filter "name=sift"
+          docker logs --tail 40 sift 2>&1 || true
+          echo "::endgroup::"
 
       - name: Health check
         run: |
+          echo "Starting health checks against http://localhost:8000/health"
           for i in $(seq 1 30); do
+            echo "Health check attempt ${i}/30"
             if curl -sf http://localhost:8000/health | jq -e '.status == "ok"' >/dev/null 2>&1; then
-              echo "Health check passed"
+              echo "✅ Health check passed on attempt ${i}/30"
               exit 0
             fi
             echo "Waiting for Sift... ($i/30)"
             sleep 2
           done
-          echo "Health check timed out"
+          echo "❌ Health check timed out after 30 attempts"
+          echo "::group::Health check failure diagnostics"
+          docker ps --filter "name=sift"
+          docker logs --tail 80 sift 2>&1 || true
+          echo "::endgroup::"
           exit 1
 
       - name: Trigger feedback sync
@@ -169,10 +204,10 @@ jobs:
           echo "SIFT_INSTALLATION_ID set: $([ -n "${SIFT_INSTALLATION_ID:-}" ] && echo yes || echo no)"
           echo "SIFT_GITHUB_TOKEN length: ${#SIFT_GH}"
           echo "GITHUB_TOKEN_DEFAULT length: ${#GHD}"
-          echo "(Exit 22 from curl -f means HTTP 4xx/5xx; this step now prints status + body.)"
           echo "::endgroup::"
 
           if [ "$AUTH_MODE" = "installation_id" ] && [ -n "${SIFT_INSTALLATION_ID:-}" ]; then
+            echo "Using installation_id payload mode"
             BODY=$(jq -n \
               --arg owner "$OWNER" \
               --arg repo "$REPO" \
@@ -180,10 +215,12 @@ jobs:
               --argjson merged "$INPUT_MERGED" \
               --argjson installation_id "$SIFT_INSTALLATION_ID" \
               '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, installation_id: $installation_id}') \
-              || { echo "::error::jq failed building BODY (installation_id). Check merged/pr_number are valid JSON."; exit 1; }
+              || { echo "❌ jq failed building BODY (installation_id). Check merged/pr_number are valid JSON."; echo "::error::jq failed building BODY (installation_id). Check merged/pr_number are valid JSON."; exit 1; }
           else
+            echo "Using github_token payload mode"
             GH_TOKEN="${SIFT_GITHUB_TOKEN:-$GITHUB_TOKEN_DEFAULT}"
             if [ -z "$GH_TOKEN" ]; then
+              echo "❌ No GitHub token configured"
               echo "::error::No GitHub token: set secrets.SIFT_GITHUB_TOKEN or pass github.token to the workflow"
               exit 1
             fi
@@ -194,7 +231,7 @@ jobs:
               --argjson merged "$INPUT_MERGED" \
               --arg github_token "$GH_TOKEN" \
               '{owner: $owner, repo: $repo, pr_number: $pr_number, merged: $merged, github_token: $github_token}') \
-              || { echo "::error::jq failed building BODY (github_token). Check merged/pr_number are valid JSON."; exit 1; }
+              || { echo "❌ jq failed building BODY (github_token). Check merged/pr_number are valid JSON."; echo "::error::jq failed building BODY (github_token). Check merged/pr_number are valid JSON."; exit 1; }
           fi
 
           echo "::group::Feedback request (redacted)"
@@ -205,7 +242,7 @@ jobs:
           '
           echo "::endgroup::"
 
-          echo "POST http://localhost:8000/feedback …"
+          echo "POST http://localhost:8000/feedback (auth_header_set=$([ -n "$AUTH_HEADER" ] && echo yes || echo no))"
           CURL_EXIT=0
           CURL_RAW=""
           if [ -n "$AUTH_HEADER" ]; then
@@ -228,12 +265,16 @@ jobs:
           echo "::endgroup::"
 
           if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "❌ Feedback request failed: curl exited with code $CURL_EXIT"
             echo "::error::curl failed (exit $CURL_EXIT). Is the container listening on :8000?"
             exit 1
           fi
           case "${HTTP_CODE:-}" in
-            2[0-9][0-9]) ;;
+            2[0-9][0-9])
+              echo "✅ Feedback request accepted (HTTP $HTTP_CODE)"
+              ;;
             *)
+              echo "❌ Feedback request failed (HTTP ${HTTP_CODE:-unknown})"
               echo "::error::POST /feedback failed (HTTP ${HTTP_CODE:-unknown}). See response body and diagnostics above."
               exit 1
               ;;
@@ -241,10 +282,32 @@ jobs:
 
       - name: Wait for feedback sync completion
         run: |
-          timeout 300 bash -c 'until docker logs sift 2>&1 | grep -qE "Feedback sync completed|Feedback sync skipped|Reaction sync failed"; do sleep 2; done' || true
+          set -eo pipefail
+          echo "Waiting up to 300s for feedback sync completion markers"
+          if timeout 300 bash -c 'until docker logs sift 2>&1 | grep -qE "Feedback sync completed|Feedback sync skipped|Reaction sync failed"; do sleep 2; done'; then
+            echo "✅ Feedback sync completion marker detected"
+          else
+            echo "❌ Timed out waiting for feedback sync completion markers"
+          fi
+          echo "::group::Feedback completion log snapshot"
+          docker logs --tail 120 sift 2>&1 || true
+          echo "::endgroup::"
 
       - name: Stop container
         if: always()
         run: |
-          docker stop sift 2>/dev/null || true
-          docker rm -f sift 2>/dev/null || true
+          if docker ps -a --format '{{.Names}}' | grep -qx sift; then
+            echo "Stopping container: sift"
+            if docker stop sift 2>/dev/null; then
+              echo "✅ Container stopped"
+            else
+              echo "❌ Failed to stop container sift"
+            fi
+            if docker rm -f sift 2>/dev/null; then
+              echo "✅ Container removed"
+            else
+              echo "❌ Failed to remove container sift"
+            fi
+          else
+            echo "✅ Container sift not present; nothing to clean"
+          fi
