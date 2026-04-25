@@ -19,7 +19,7 @@ async def _get_installation_token(installation_id: int) -> str:
         headers: Dict[str, str] = {"Content-Type": "application/json"}
         if config.SIFT_API_KEY:
             headers["Authorization"] = f"Bearer {config.SIFT_API_KEY}"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
             r = await client.post(
                 f"{config.SWIFT_API_BACKEND_BASE_URL}/api/github/installation-token",
                 json={"installation_id": installation_id},
