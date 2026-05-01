@@ -628,7 +628,7 @@ def extract_comment_severity_and_title(body: str) -> tuple:
 def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     """Build a structured summary with alert blocks and collapsible file details."""
     if not comments:
-        return "No inline comments for this review."
+        return "Sifted through the code and found no issues."
 
     counts: Dict[str, int] = {"bug": 0, "security": 0, "warning": 0, "suggestion": 0}
     by_path: Dict[str, List[Dict[str, Any]]] = {}
