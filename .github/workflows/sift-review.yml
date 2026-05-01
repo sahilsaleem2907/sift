@@ -139,6 +139,7 @@ jobs:
             -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
+            -e OPENROUTER_API_KEY="$SIFT_LLM_API_KEY" \
             -e LLM_API_BASE="${SIFT_LLM_API_BASE}" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \
             -e EMBEDDING_MODEL="${SIFT_EMBEDDING_MODEL}" \
