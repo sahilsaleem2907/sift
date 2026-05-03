@@ -743,7 +743,7 @@ async def run_review(
                 for c in collected
                 if c["line"] in diff_lines_per_path.get(c["path"], set())
             ]
-            summary = await summarize_review(collected) if collected else "No inline comments for this review."
+            summary = await summarize_review(collected) if collected else "Sifted through the code and found no issues."
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
 
