@@ -25,10 +25,10 @@ on:
         default: "github_token"
     secrets:
       SIFT_IMAGE:
-        required: true
+        required: false
         description: "Container image (e.g. ghcr.io/owner/sift:latest)"
       SIFT_DATABASE_URL:
-        required: true
+        required: false
         description: "PostgreSQL connection string for the container"
       SIFT_API_KEY:
         required: false
