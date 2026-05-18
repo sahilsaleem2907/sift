@@ -71,6 +71,17 @@ SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") 
 SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
 SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
 
+# PR blocking via commit status (default: disabled)
+_BLOCK_PRS_RAW = (os.environ.get("SIFT_BLOCK_PRS_ENABLED") or "0").strip().lower()
+SIFT_BLOCK_PRS_ENABLED = _BLOCK_PRS_RAW in ("1", "true", "yes")
+SIFT_BLOCK_ON_SEVERITIES = [
+    s.strip().lower()
+    for s in (os.environ.get("SIFT_BLOCK_ON_SEVERITIES") or "bug,security").split(",")
+    if s.strip()
+]
+SIFT_BLOCK_MIN_FINDINGS = int(os.environ.get("SIFT_BLOCK_MIN_FINDINGS") or "1")
+SIFT_STATUS_CONTEXT = os.environ.get("SIFT_STATUS_CONTEXT") or "sift/review"
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""
