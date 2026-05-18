@@ -346,7 +346,7 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 out.append({
                     "line": line_int,
                     "body": body,
-                    "post_inline": confidence >= 7,
+                    "post_inline": True,
                 })
         if out:
             return out

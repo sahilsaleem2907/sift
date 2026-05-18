@@ -549,7 +549,11 @@ async def run_review(
                     semgrep_for_llm: List[Dict[str, Any]] = []
                 else:
                     all_semgrep = findings_by_path.get(path0, [])
-                    semgrep_on_diff = [f for f in all_semgrep if f.get("line") in diff_lines]
+                    semgrep_on_diff = [
+                        f for f in all_semgrep
+                        if f.get("line") in diff_lines
+                        and (f.get("severity") or "").upper() in ("WARNING", "ERROR")
+                    ]
                     semgrep_critical = [
                         {**f, "critical_bypass": True}
                         for f in all_semgrep
@@ -578,7 +582,11 @@ async def run_review(
                     codeql_for_llm: List[Dict[str, Any]] = []
                 else:
                     all_codeql = codeql_findings_by_path.get(path0, [])
-                    codeql_on_diff = [f for f in all_codeql if f.get("line") in diff_lines]
+                    codeql_on_diff = [
+                        f for f in all_codeql
+                        if f.get("line") in diff_lines
+                        and (f.get("severity") or "").upper() in ("WARNING", "ERROR")
+                    ]
                     codeql_critical = [
                         {**f, "critical_bypass": True}
                         for f in all_codeql
@@ -596,7 +604,11 @@ async def run_review(
 
                 raw_linter_list = linter_issues_by_path.get(path0, []) if (not config.SIFT_SMART_ROUTING_ENABLED or path0 in linter_paths) else []
                 raw_linter_count = len(raw_linter_list)
-                linter_on_diff = [i for i in raw_linter_list if i.get("line") in diff_lines]
+                linter_on_diff = [
+                    i for i in raw_linter_list
+                    if i.get("line") in diff_lines
+                    and (i.get("severity") or "").lower() in ("warning", "error")
+                ]
                 linter_critical = [
                     {**i, "critical_bypass": True}
                     for i in raw_linter_list
@@ -789,8 +801,8 @@ async def run_review(
                 c for c in collected if c.get("post_inline", True)
             ]
             summary = (
-                await summarize_review(all_comments)
-                if all_comments
+                await summarize_review(inline_comments)
+                if inline_comments
                 else "Sifted through the code and found no issues."
             )
             if not summary.strip():
