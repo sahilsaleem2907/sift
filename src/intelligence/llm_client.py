@@ -325,6 +325,7 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     arr = _extract_json_array(text)
     if arr is not None and isinstance(arr, list):
         out: List[Dict[str, Any]] = []
+        skipped = 0
         for item in arr:
             if not isinstance(item, dict):
                 continue
@@ -339,7 +340,16 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 confidence = int(item.get("confidence", 7))
             except (TypeError, ValueError):
                 confidence = 7
+            logger.debug(
+                "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
+                path, line_int, item.get("severity"), item.get("title"), confidence,
+            )
             if confidence < 4:
+                skipped += 1
+                logger.debug(
+                    "LLM finding SKIPPED (confidence=%s < 4): file=%s line=%s title=%r",
+                    confidence, path, line_int, item.get("title"),
+                )
                 continue
             body = _format_structured_comment_body(item)
             if body.strip():
@@ -348,6 +358,10 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                     "body": body,
                     "post_inline": True,
                 })
+        logger.debug(
+            "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
+            path, len(arr), len(out), skipped,
+        )
         if out:
             return out
         logger.debug("JSON array empty or invalid items for %s", path)
