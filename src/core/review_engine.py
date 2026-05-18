@@ -20,7 +20,8 @@ from src.core.analysis_routing import (
     risk_level,
     score_risk_combined,
 )
-from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
+from src.intelligence.ast.diff_ast import build_diff_ast, get_new_file_plus_line_ranges
+from src.core.import_analyzer import resolve_pr_import_graph
 from src.intelligence.ast.function_extract import extract_modified_functions
 from src.feedback.preferences import format_labeled_comment_examples
 from src.intelligence.llm_client import review_file, summarize_review
@@ -128,22 +129,30 @@ def _store_results_cache(
 
 def _merge_comments_by_line(collected: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """One comment per (path, line). If multiple bodies for same line, merge with bullet points."""
-    by_key: Dict[Tuple[str, int], List[str]] = defaultdict(list)
+    by_key: Dict[Tuple[str, int], List[Dict[str, Any]]] = defaultdict(list)
     for item in collected:
         key = (item["path"], item["line"])
         body = (item.get("body") or "").strip()
         if body:
-            by_key[key].append(body)
+            by_key[key].append(item)
     merged: List[Dict[str, Any]] = []
-    for (path, line), bodies in by_key.items():
+    for (path, line), items in by_key.items():
+        post_inline = any(i.get("post_inline", True) for i in items)
+        bodies = [(i.get("body") or "").strip() for i in items]
         if len(bodies) == 1:
-            merged.append({"path": path, "line": line, "body": bodies[0]})
+            merged.append({
+                "path": path,
+                "line": line,
+                "body": bodies[0],
+                "post_inline": post_inline,
+            })
         else:
             merged.append(
                 {
                     "path": path,
                     "line": line,
                     "body": "**Issues:**\n" + "\n".join(f"- {b}" for b in bodies),
+                    "post_inline": post_inline,
                 }
             )
     return merged
@@ -499,6 +508,23 @@ async def run_review(
                     repo_full,
                 )
 
+            mod_funcs_by_path: Dict[str, list] = {}
+            for path, file_diff in file_chunks:
+                if not file_diff.strip():
+                    mod_funcs_by_path[path] = []
+                    continue
+                try:
+                    mod_funcs_by_path[path] = extract_modified_functions(
+                        path, path_to_content.get(path) or "", file_diff
+                    )
+                except Exception as e:
+                    logger.debug("extract_modified_functions failed for %s: %s", path, e)
+                    mod_funcs_by_path[path] = []
+
+            pr_import_graph = resolve_pr_import_graph(
+                file_chunks, path_to_content, mod_funcs_by_path
+            )
+
             _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)
 
             async def _process_file(path_diff_list: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
@@ -596,14 +622,26 @@ async def run_review(
                         **i,
                         "snippet": snippet,
                     })
-                # Surrounding context: ±10 lines around each changed hunk for better LLM understanding
                 file_content = path_to_content.get(path0) or ""
                 num_lines = len(file_lines)
                 plus_ranges = get_new_file_plus_line_ranges(file_diff)
-                expanded_ranges = [
-                    (max(1, s - 10), min(num_lines, e + 10))
-                    for s, e in plus_ranges
-                ]
+                mod_funcs = mod_funcs_by_path.get(path0) or []
+                if mod_funcs:
+                    expanded_ranges = [(c.start_line, c.end_line) for c in mod_funcs]
+                else:
+                    expanded_ranges = [
+                        (max(1, s - 20), min(num_lines, e + 20))
+                        for s, e in plus_ranges
+                    ]
+
+                try:
+                    ast_diff_result = build_diff_ast(path0, file_content, file_diff)
+                except Exception as e:
+                    logger.debug("build_diff_ast failed for %s: %s", path0, e)
+                    ast_diff_result = None
+
+                caller_context = pr_import_graph.get(path0)
+
                 file_pr_context = {
                     **(pr_context or {}),
                     "semgrep_findings": semgrep_for_llm,
@@ -615,6 +653,8 @@ async def run_review(
                         "content": file_content,
                     },
                     "repo_feedback_labeled_comments": _labeled_comments_text or None,
+                    "ast_diff": ast_diff_result,
+                    "caller_context": caller_context,
                 }
 
                 if config.VECTOR_DB_ENABLED:
@@ -622,10 +662,6 @@ async def run_review(
                         from src.intelligence.embeddings import get_embeddings
                         from src.storage.vector_store import search_similar
 
-                        logger.debug("[Vector] path=%s: extracting modified functions from diff", path0)
-                        mod_funcs = extract_modified_functions(
-                            path0, path_to_content.get(path0, ""), file_diff
-                        )
                         if not mod_funcs:
                             logger.debug("[Vector] path=%s: no modified functions in diff, skipping embed/search", path0)
                         else:
@@ -682,7 +718,12 @@ async def run_review(
                         for c in comments:
                             for path, _ in path_diff_list:
                                 file_comments.append(
-                                    {"path": path, "line": c["line"], "body": c["body"]}
+                                    {
+                                        "path": path,
+                                        "line": c["line"],
+                                        "body": c["body"],
+                                        "post_inline": c.get("post_inline", True),
+                                    }
                                 )
                     except Exception as e:
                         logger.warning("review_file failed for %s: %s", path0, e)
@@ -743,7 +784,15 @@ async def run_review(
                 for c in collected
                 if c["line"] in diff_lines_per_path.get(c["path"], set())
             ]
-            summary = await summarize_review(collected) if collected else "Sifted through the code and found no issues."
+            all_comments = list(collected)
+            inline_comments = [
+                c for c in collected if c.get("post_inline", True)
+            ]
+            summary = (
+                await summarize_review(all_comments)
+                if all_comments
+                else "Sifted through the code and found no issues."
+            )
             if not summary.strip():
                 summary = "Review completed with inline comments on the Files changed tab."
 
@@ -757,7 +806,7 @@ async def run_review(
                 pr_number,
                 commit_id=commit_id,
                 body="",
-                comments=collected,
+                comments=inline_comments,
             )
             try:
                 store_review(

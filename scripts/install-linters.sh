@@ -20,6 +20,10 @@ unzip -q -o /tmp/tflint.zip -d /usr/local/bin tflint
 chmod +x /usr/local/bin/tflint
 rm -f /tmp/tflint.zip
 
+# --- Python ruff + bandit ---
+echo "Installing ruff and bandit..."
+pip install --no-cache-dir ruff bandit
+
 # --- Node global linters ---
 echo "Installing npm global linters..."
 npm install -g eslint typescript stylelint markdownlint-cli

@@ -25,24 +25,35 @@ Look specifically for:
 - Security issues (injection, auth bypass, improper validation)
 - Resource leaks (unclosed files/connections)
 - Type mismatches or wrong API usage
+- Function/type signature changes that could break callers
+- Missing error handling on new async or IO code paths
+- Coupling or abstraction violations (accessing internals, bypassing interface layers)
 
-Respond ONLY with a JSON array. No prose, no markdown fences around the array. Each element:
+If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
+
+Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
+(1) What semantically changed (2) Which call sites or error paths may be affected.
+Then output the JSON array after the reasoning block.
+
+Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
 {
   "line": <integer — must be a line number marked [L<n>] in the diff below>,
   "severity": "bug" | "security" | "warning" | "suggestion",
   "title": "<10 words max>",
   "body": "<description of the issue>",
-  "fix": "<optional: corrected code only, no diff markers>"
+  "fix": "<optional: corrected code only, no diff markers>",
+  "confidence": <integer 1-10, your certainty this is a real issue>
 }
 
 Rules:
 - "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
+- "confidence" 8-10 = definite issue; 5-7 = likely; 1-4 = speculative (prefer omitting low confidence).
 - Return [] if there is nothing significant to report.
 """
 
-SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
+SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*(.*)")
@@ -324,9 +335,19 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 continue
             if line_int is None or line_int <= 0:
                 continue
+            try:
+                confidence = int(item.get("confidence", 7))
+            except (TypeError, ValueError):
+                confidence = 7
+            if confidence < 4:
+                continue
             body = _format_structured_comment_body(item)
             if body.strip():
-                out.append({"line": line_int, "body": body})
+                out.append({
+                    "line": line_int,
+                    "body": body,
+                    "post_inline": confidence >= 7,
+                })
         if out:
             return out
         logger.debug("JSON array empty or invalid items for %s", path)
@@ -470,6 +491,30 @@ def _format_repo_preferences(prefs_text: str) -> str:
     return (prefs_text or "").strip()
 
 
+def _format_caller_context(caller_infos: List[Any]) -> str:
+    """Format PR-internal import/caller context for the LLM."""
+    if not caller_infos:
+        return ""
+    lines = [
+        "Other files in this PR import from changed modules below. "
+        "Check that usages in this file remain compatible with their modifications:",
+    ]
+    for info in caller_infos:
+        changed = getattr(info, "changed_path", None) or (
+            info.get("changed_path") if isinstance(info, dict) else "?"
+        )
+        names = getattr(info, "function_names", None)
+        if names is None and isinstance(info, dict):
+            names = info.get("function_names") or ()
+        names = tuple(names or ())
+        if names:
+            sym = ", ".join(f"`{n}`" for n in names)
+            lines.append(f"- `{changed}` — modified symbols: {sym}")
+        else:
+            lines.append(f"- `{changed}` — module was modified (verify imports and call compatibility)")
+    return "\n".join(lines)
+
+
 def _format_similar_snippets(matches: List[Any]) -> str:
     """Format vector-similarity matches into an LLM-friendly context block."""
     if not matches:
@@ -546,6 +591,12 @@ async def review_file(
         lc_block = _format_repo_preferences(labeled_comments)
         if lc_block:
             user_parts.append(lc_block)
+
+    caller_context = (pr_context or {}).get("caller_context")
+    if caller_context:
+        cc_block = _format_caller_context(caller_context)
+        if cc_block:
+            user_parts.append(cc_block)
 
     diff_intro = (
         f"File: {path}\n\n"
@@ -723,8 +774,27 @@ async def summarize_review(comments: List[Dict[str, Any]]) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
     comments: list of {path, line, body} (or at least body for each).
+    When >= 3 issues, prepends an LLM synthesis of cross-file patterns.
     """
-    return _build_structured_summary(comments)
+    structured = _build_structured_summary(comments)
+    if len(comments) < 3:
+        return structured
+    issue_lines = []
+    for c in comments:
+        path = c.get("path", "?")
+        line = c.get("line", "?")
+        body = (c.get("body") or "").strip()
+        if len(body) > 200:
+            body = body[:197] + "..."
+        issue_lines.append(f"- [{path}:{line}] {body}")
+    try:
+        raw = await _call_llm(SUMMARIZE_SYSTEM, "\n".join(issue_lines))
+        if raw and raw.strip():
+            synthesis = f"### Cross-file patterns\n\n{raw.strip()}\n\n---\n\n"
+            return synthesis + structured
+    except Exception as e:
+        logger.warning("LLM cross-file synthesis failed: %s", e)
+    return structured
 
 
 async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:

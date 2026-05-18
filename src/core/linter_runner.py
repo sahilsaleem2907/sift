@@ -24,7 +24,7 @@ def _detect_linter(path: str) -> Optional[str]:
     if name == "dockerfile" or p.endswith(".dockerfile"):
         return "hadolint"
     if p.endswith(".py"):
-        return "pylint"
+        return "python"
     if p.endswith((".js", ".mjs", ".cjs")):
         return "eslint"
     if p.endswith((".ts", ".tsx")):
@@ -126,6 +126,120 @@ def _run_pylint(root: Path, path: str) -> List[LinterIssue]:
             "source": "pylint",
         })
     return out
+
+
+def _run_ruff(root: Path, path: str) -> List[LinterIssue]:
+    """Run ruff check on a single file; return list of unified issues."""
+    out: List[LinterIssue] = []
+    full = root / path
+    if not full.exists():
+        return out
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--output-format", "json", str(full)],
+            capture_output=True,
+            text=True,
+            timeout=LINTER_TIMEOUT_PER_FILE,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("ruff not found in PATH for %s", path)
+        return out
+    except subprocess.TimeoutExpired:
+        logger.debug("ruff timed out for %s", path)
+        return out
+    except Exception as e:
+        logger.debug("ruff failed for %s: %s", path, e)
+        return out
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return out
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("location") or {}
+        line = loc.get("row")
+        if line is None:
+            continue
+        msg = (item.get("message") or "").strip()
+        code = item.get("code") or ""
+        out.append({
+            "line": line,
+            "message": msg,
+            "severity": "warning",
+            "rule_id": code,
+            "source": "ruff",
+        })
+    return out
+
+
+def _run_bandit(root: Path, path: str) -> List[LinterIssue]:
+    """Run bandit on a single file; return list of unified issues."""
+    out: List[LinterIssue] = []
+    full = root / path
+    if not full.exists():
+        return out
+    try:
+        result = subprocess.run(
+            ["bandit", "-f", "json", "-q", str(full)],
+            capture_output=True,
+            text=True,
+            timeout=LINTER_TIMEOUT_PER_FILE,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("bandit not found in PATH for %s", path)
+        return out
+    except subprocess.TimeoutExpired:
+        logger.debug("bandit timed out for %s", path)
+        return out
+    except Exception as e:
+        logger.debug("bandit failed for %s: %s", path, e)
+        return out
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return out
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return out
+    sev_map = {"HIGH": "error", "MEDIUM": "warning", "LOW": "info"}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        line = item.get("line_number")
+        if line is None:
+            continue
+        msg = (item.get("issue_text") or "").strip()
+        test_id = item.get("test_id") or ""
+        sev = sev_map.get((item.get("issue_severity") or "").upper(), "warning")
+        out.append({
+            "line": line,
+            "message": msg,
+            "severity": sev,
+            "rule_id": test_id,
+            "source": "bandit",
+        })
+    return out
+
+
+def _run_python_linters(root: Path, path: str) -> List[LinterIssue]:
+    """Run ruff and bandit on a Python file."""
+    issues: List[LinterIssue] = []
+    issues.extend(_run_ruff(root, path))
+    issues.extend(_run_bandit(root, path))
+    return issues
 
 
 def _run_eslint(root: Path, path: str) -> List[LinterIssue]:
@@ -1321,7 +1435,7 @@ def run_linters(path_to_content: Dict[str, str]) -> Dict[str, List[LinterIssue]]
     """Run language-appropriate linters on each path. Return path -> list of unified issues.
 
     Each issue has: line, message, severity (optional), rule_id (optional), source.
-    Supported sources: pylint, eslint, tsc, go vet, spotbugs, rubocop, rustc, cppcheck,
+    Supported sources: ruff, bandit, eslint, tsc, go vet, spotbugs, rubocop, rustc, cppcheck,
     mcs, phpstan, swiftlint, ktlint, shellcheck, stylelint, yamllint, hadolint, tflint,
     luacheck, elixirc, lintr, perlcritic, markdownlint, json.tool.
     If a linter is missing or fails, that file gets no issues (log and continue).
@@ -1355,8 +1469,8 @@ def run_linters(path_to_content: Dict[str, str]) -> Dict[str, List[LinterIssue]]
                 continue
 
             issues: List[LinterIssue] = []
-            if linter == "pylint":
-                issues = _run_pylint(root, path)
+            if linter == "python":
+                issues = _run_python_linters(root, path)
             elif linter == "eslint":
                 issues = _run_eslint(root, path)
             elif linter == "ts":
