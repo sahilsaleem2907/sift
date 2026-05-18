@@ -6,7 +6,9 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from src import config
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +27,14 @@ def _detect_linter(path: str) -> Optional[str]:
         return "hadolint"
     if p.endswith(".py"):
         return "python"
-    if p.endswith((".js", ".mjs", ".cjs")):
+    if p.endswith((".js", ".mjs", ".cjs", ".jsx")):
         return "eslint"
     if p.endswith((".ts", ".tsx")):
         return "ts"
+    if name == "package-lock.json":
+        return "npm_audit"
+    if name == "yarn.lock":
+        return "yarn_audit"
     if p.endswith(".go"):
         return "go"
     if p.endswith(".java"):
@@ -295,6 +301,101 @@ def _run_eslint(root: Path, path: str) -> List[LinterIssue]:
                 "rule_id": rule_id,
                 "source": "eslint",
             })
+    return out
+
+
+def _dedup_by_line_rule(issues: List[LinterIssue]) -> List[LinterIssue]:
+    """Drop duplicate issues sharing the same line and rule_id."""
+    seen: set[Tuple[int, str]] = set()
+    out: List[LinterIssue] = []
+    for issue in issues:
+        line = issue.get("line")
+        if line is None:
+            out.append(issue)
+            continue
+        rule_id = str(issue.get("rule_id") or "")
+        key = (int(line), rule_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(issue)
+    return out
+
+
+def _run_oxlint(root: Path, path: str) -> List[LinterIssue]:
+    """Run oxlint on a single file; return list of unified issues."""
+    out: List[LinterIssue] = []
+    full = root / path
+    if not full.exists():
+        return out
+    try:
+        result = subprocess.run(
+            ["oxlint", "--format", "json", str(full)],
+            capture_output=True,
+            text=True,
+            timeout=LINTER_TIMEOUT_PER_FILE,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("oxlint not found in PATH for %s", path)
+        return out
+    except subprocess.TimeoutExpired:
+        logger.debug("oxlint timed out for %s", path)
+        return out
+    except Exception as e:
+        logger.debug("oxlint failed for %s: %s", path, e)
+        return out
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return out
+    # oxlint may return a list or {"diagnostics": [...]}
+    items: List[Any]
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("diagnostics") or data.get("messages") or []
+        if not isinstance(items, list):
+            items = []
+    else:
+        return out
+
+    base_name = Path(path).name
+    path_norm = path.replace("\\", "/")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start") or item.get("labels") or {}
+        if isinstance(start, list) and start:
+            start = start[0] if isinstance(start[0], dict) else {}
+        line = None
+        if isinstance(start, dict):
+            line = start.get("line") or start.get("row")
+        if line is None:
+            line = item.get("line")
+        if line is None:
+            continue
+        file_part = (item.get("filename") or item.get("file") or "").replace("\\", "/")
+        if file_part and base_name not in file_part and path_norm not in file_part:
+            continue
+        sev = (item.get("severity") or "warning").lower()
+        if sev in ("error", "err"):
+            severity = "error"
+        elif sev in ("warning", "warn"):
+            severity = "warning"
+        else:
+            severity = "info"
+        out.append({
+            "line": int(line),
+            "message": (item.get("message") or "").strip(),
+            "severity": severity,
+            "rule_id": item.get("rule") or item.get("code") or "",
+            "source": "oxlint",
+        })
     return out
 
 
@@ -1431,13 +1532,195 @@ def _run_json_syntax(root: Path, path: str) -> List[LinterIssue]:
     return out
 
 
+def _dep_line_in_package_json(content: str, dep_name: str) -> int:
+    """Return 1-based line number of dep_name in package.json dependencies sections."""
+    try:
+        pkg = json.loads(content)
+    except json.JSONDecodeError:
+        return 1
+    deps = pkg.get("dependencies") or {}
+    dev_deps = pkg.get("devDependencies") or {}
+    if dep_name not in deps and dep_name not in dev_deps:
+        return 1
+    pattern = re.compile(rf'^\s*"{re.escape(dep_name)}"\s*:', re.MULTILINE)
+    m = pattern.search(content)
+    if m:
+        return content[: m.start()].count("\n") + 1
+    return 1
+
+
+def _audit_severity(level: str) -> str:
+    """Map npm/yarn audit severity to unified severity."""
+    s = (level or "").lower()
+    if s in ("critical", "high"):
+        return "error"
+    if s == "moderate":
+        return "warning"
+    return "info"
+
+
+def _write_pkg_files_for_audit(
+    root: Path,
+    path_to_content: Dict[str, str],
+    lock_key: str,
+) -> Optional[str]:
+    """Write package.json and lockfile into root. Returns package.json content or None."""
+    pkg_content = path_to_content.get("package.json")
+    lock_content = path_to_content.get(lock_key)
+    if not pkg_content or not lock_content:
+        return None
+    pkg_path = root / "package.json"
+    lock_path = root / lock_key
+    try:
+        pkg_path.parent.mkdir(parents=True, exist_ok=True)
+        pkg_path.write_text(pkg_content, encoding="utf-8")
+        lock_path.write_text(lock_content, encoding="utf-8")
+    except (OSError, UnicodeEncodeError) as e:
+        logger.debug("Skip writing package files for audit: %s", e)
+        return None
+    return pkg_content
+
+
+def _run_npm_audit(
+    root: Path, path: str, path_to_content: Dict[str, str]
+) -> List[LinterIssue]:
+    """Run npm audit; return issues with lines mapped to package.json."""
+    out: List[LinterIssue] = []
+    pkg_content = _write_pkg_files_for_audit(root, path_to_content, "package-lock.json")
+    if not pkg_content:
+        return out
+    try:
+        result = subprocess.run(
+            ["npm", "audit", "--json", "--audit-level=moderate"],
+            capture_output=True,
+            text=True,
+            timeout=LINTER_TIMEOUT_PER_FILE,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("npm not found in PATH for audit")
+        return out
+    except subprocess.TimeoutExpired:
+        logger.debug("npm audit timed out")
+        return out
+    except Exception as e:
+        logger.debug("npm audit failed: %s", e)
+        return out
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return out
+    if not isinstance(data, dict):
+        return out
+
+    vulns = data.get("vulnerabilities") or {}
+    if not isinstance(vulns, dict):
+        return out
+
+    for dep_name, info in vulns.items():
+        if not isinstance(info, dict):
+            continue
+        sev = info.get("severity") or ""
+        if sev.lower() in ("low",):
+            continue
+        line = _dep_line_in_package_json(pkg_content, dep_name)
+        title = info.get("name") or dep_name
+        via = info.get("via")
+        detail = ""
+        if isinstance(via, list) and via:
+            first = via[0]
+            if isinstance(first, dict):
+                detail = (first.get("title") or first.get("url") or "").strip()
+        msg = f"Vulnerable dependency: {title}"
+        if detail:
+            msg = f"{msg} — {detail}"
+        out.append({
+            "line": line,
+            "message": msg,
+            "severity": _audit_severity(sev),
+            "rule_id": f"npm-audit-{dep_name}",
+            "source": "npm_audit",
+        })
+    return out
+
+
+def _run_yarn_audit(
+    root: Path, path: str, path_to_content: Dict[str, str]
+) -> List[LinterIssue]:
+    """Run yarn audit; return issues with lines mapped to package.json."""
+    out: List[LinterIssue] = []
+    pkg_content = _write_pkg_files_for_audit(root, path_to_content, "yarn.lock")
+    if not pkg_content:
+        return out
+    try:
+        result = subprocess.run(
+            ["yarn", "audit", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=LINTER_TIMEOUT_PER_FILE,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("yarn not found in PATH for audit")
+        return out
+    except subprocess.TimeoutExpired:
+        logger.debug("yarn audit timed out")
+        return out
+    except Exception as e:
+        logger.debug("yarn audit failed: %s", e)
+        return out
+
+    seen_deps: set[str] = set()
+    for line_str in (result.stdout or "").splitlines():
+        line_str = line_str.strip()
+        if not line_str:
+            continue
+        try:
+            obj = json.loads(line_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "auditAdvisory":
+            continue
+        data = obj.get("data") or {}
+        advisory = data.get("advisory") if isinstance(data, dict) else None
+        if not isinstance(advisory, dict):
+            continue
+        dep_name = advisory.get("module_name") or ""
+        if not dep_name or dep_name in seen_deps:
+            continue
+        sev = advisory.get("severity") or ""
+        if sev.lower() in ("low",):
+            continue
+        seen_deps.add(dep_name)
+        line = _dep_line_in_package_json(pkg_content, dep_name)
+        title = (advisory.get("title") or "").strip()
+        msg = f"Vulnerable dependency: {dep_name}"
+        if title:
+            msg = f"{msg} — {title}"
+        out.append({
+            "line": line,
+            "message": msg,
+            "severity": _audit_severity(sev),
+            "rule_id": f"yarn-audit-{dep_name}",
+            "source": "yarn_audit",
+        })
+    return out
+
+
 def run_linters(path_to_content: Dict[str, str]) -> Dict[str, List[LinterIssue]]:
     """Run language-appropriate linters on each path. Return path -> list of unified issues.
 
     Each issue has: line, message, severity (optional), rule_id (optional), source.
-    Supported sources: ruff, bandit, eslint, tsc, go vet, spotbugs, rubocop, rustc, cppcheck,
-    mcs, phpstan, swiftlint, ktlint, shellcheck, stylelint, yamllint, hadolint, tflint,
-    luacheck, elixirc, lintr, perlcritic, markdownlint, json.tool.
+    Supported sources: ruff, bandit, eslint, oxlint, tsc, go vet, spotbugs, rubocop, rustc,
+    cppcheck, mcs, phpstan, swiftlint, ktlint, shellcheck, stylelint, yamllint, hadolint,
+    tflint, luacheck, elixirc, lintr, perlcritic, markdownlint, json.tool, npm_audit,
+    yarn_audit.
     If a linter is missing or fails, that file gets no issues (log and continue).
     """
     if not path_to_content:
@@ -1472,10 +1755,34 @@ def run_linters(path_to_content: Dict[str, str]) -> Dict[str, List[LinterIssue]]
             if linter == "python":
                 issues = _run_python_linters(root, path)
             elif linter == "eslint":
-                issues = _run_eslint(root, path)
+                raw = _run_eslint(root, path)
+                if config.OXLINT_ENABLED:
+                    raw.extend(_run_oxlint(root, path))
+                issues = _dedup_by_line_rule(raw)
             elif linter == "ts":
-                issues = _run_eslint(root, path)
-                issues.extend(_run_tsc(root, path))
+                raw = _run_eslint(root, path)
+                raw.extend(_run_tsc(root, path))
+                if config.OXLINT_ENABLED:
+                    raw.extend(_run_oxlint(root, path))
+                issues = _dedup_by_line_rule(raw)
+            elif linter == "npm_audit":
+                if config.NPM_AUDIT_ENABLED:
+                    audit_issues = _run_npm_audit(root, path, path_to_content)
+                    report_path = (
+                        "package.json" if "package.json" in path_to_content else path
+                    )
+                    if audit_issues:
+                        by_path.setdefault(report_path, []).extend(audit_issues)
+                continue
+            elif linter == "yarn_audit":
+                if config.YARN_AUDIT_ENABLED:
+                    audit_issues = _run_yarn_audit(root, path, path_to_content)
+                    report_path = (
+                        "package.json" if "package.json" in path_to_content else path
+                    )
+                    if audit_issues:
+                        by_path.setdefault(report_path, []).extend(audit_issues)
+                continue
             elif linter == "go":
                 issues = _run_go_vet(root, path)
             elif linter == "java":

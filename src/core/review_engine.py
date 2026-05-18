@@ -10,7 +10,7 @@ from src import config
 from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
 from src.core.linter_runner import run_linters, _detect_linter
-from src.core.semgrep_runner import run_semgrep
+from src.core.semgrep_runner import is_server_side_file, run_semgrep
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.analysis_routing import (
@@ -67,8 +67,8 @@ def _diff_content_key(file_diff: str) -> str:
 
 def _tool_cache_key(tool: str, path: str, content: str, linter_name: Optional[str] = None) -> Optional[str]:
     """Cache key for tool result. For linter, linter_name required (from _detect_linter). Returns None if not cacheable."""
-    if tool == "semgrep":
-        return hashlib.sha256(("semgrep" + content).encode("utf-8")).hexdigest()
+    if tool in ("semgrep", "semgrep_server"):
+        return hashlib.sha256((tool + content).encode("utf-8")).hexdigest()
     if tool == "linter":
         if not linter_name:
             return None
@@ -237,6 +237,21 @@ async def run_review(
                 fetch_results = await asyncio.gather(*[_fetch_file(p) for p, _ in file_chunks])
                 path_to_content = {p: c for p, c in fetch_results if c is not None}
 
+                # Inject lockfiles for npm/yarn audit when package.json is in the PR
+                if "package.json" in path_to_content:
+                    if "package-lock.json" not in path_to_content:
+                        lock_content = await github.get_file_content(
+                            owner, repo, "package-lock.json", commit_id
+                        )
+                        if lock_content:
+                            path_to_content["package-lock.json"] = lock_content
+                    if "yarn.lock" not in path_to_content:
+                        yarn_content = await github.get_file_content(
+                            owner, repo, "yarn.lock", commit_id
+                        )
+                        if yarn_content:
+                            path_to_content["yarn.lock"] = yarn_content
+
                 _labeled_comments_text = format_labeled_comment_examples(
                     get_repo_feedback_comment_examples(repo_full)
                 )
@@ -320,6 +335,10 @@ async def run_review(
                         len(codeql_paths),
                         skip_count,
                     )
+                    if config.NPM_AUDIT_ENABLED and "package-lock.json" in path_to_content:
+                        linter_paths.add("package-lock.json")
+                    if config.YARN_AUDIT_ENABLED and "yarn.lock" in path_to_content:
+                        linter_paths.add("yarn.lock")
 
                 if config.SIFT_SMART_ROUTING_ENABLED:
                     linter_input = {p: path_to_content[p] for p in linter_paths if p in path_to_content}
@@ -334,10 +353,29 @@ async def run_review(
 
                 # Tool result cache: split into cached vs uncached so we only run on misses
                 ttl_hours = config.TOOL_CACHE_TTL_HOURS if config.TOOL_CACHE_ENABLED else 0
+                semgrep_uncached_server: Dict[str, str] = {}
+                semgrep_uncached_other: Dict[str, str] = {}
                 if config.TOOL_CACHE_ENABLED and ttl_hours > 0:
-                    semgrep_cached, semgrep_uncached = _check_and_split_cache(
-                        "semgrep", semgrep_input, ttl_hours
-                    )
+                    if config.SEMGREP_FRAMEWORK_RULES_ENABLED and semgrep_input:
+                        server_input: Dict[str, str] = {}
+                        other_input: Dict[str, str] = {}
+                        for p, c in semgrep_input.items():
+                            if is_server_side_file(p, c):
+                                server_input[p] = c
+                            else:
+                                other_input[p] = c
+                        semgrep_server_cached, semgrep_uncached_server = _check_and_split_cache(
+                            "semgrep_server", server_input, ttl_hours
+                        )
+                        semgrep_other_cached, semgrep_uncached_other = _check_and_split_cache(
+                            "semgrep", other_input, ttl_hours
+                        )
+                        semgrep_cached = {**semgrep_server_cached, **semgrep_other_cached}
+                    else:
+                        semgrep_cached, semgrep_uncached_other = _check_and_split_cache(
+                            "semgrep", semgrep_input, ttl_hours
+                        )
+                        semgrep_uncached_server = {}
                     linter_cached, linter_uncached = _check_and_split_cache(
                         "linter", linter_input, ttl_hours
                     )
@@ -354,7 +392,15 @@ async def run_review(
                             sorted(linter_cached.keys()),
                         )
                 else:
-                    semgrep_cached, semgrep_uncached = {}, semgrep_input
+                    semgrep_cached = {}
+                    if config.SEMGREP_FRAMEWORK_RULES_ENABLED and semgrep_input:
+                        for p, c in semgrep_input.items():
+                            if is_server_side_file(p, c):
+                                semgrep_uncached_server[p] = c
+                            else:
+                                semgrep_uncached_other[p] = c
+                    else:
+                        semgrep_uncached_other = dict(semgrep_input)
                     linter_cached, linter_uncached = {}, linter_input
 
                 codeql_findings_by_path: Dict[str, List[dict]] = {}
@@ -437,7 +483,28 @@ async def run_review(
                 async def _semgrep_or_empty() -> Dict[str, List[dict]]:
                     if not run_semgrep_this_pr:
                         return {}
-                    return await asyncio.to_thread(run_semgrep, semgrep_uncached)
+                    results: Dict[str, List[dict]] = {}
+                    if semgrep_uncached_other:
+                        other_result = await asyncio.to_thread(
+                            run_semgrep, semgrep_uncached_other, []
+                        )
+                        results.update(other_result)
+                        if config.TOOL_CACHE_ENABLED:
+                            _store_results_cache(
+                                "semgrep", semgrep_uncached_other, other_result
+                            )
+                    if semgrep_uncached_server and config.SEMGREP_FRAMEWORK_RULES_ENABLED:
+                        server_result = await asyncio.to_thread(
+                            run_semgrep,
+                            semgrep_uncached_server,
+                            ["p/express", "p/nodejs"],
+                        )
+                        results.update(server_result)
+                        if config.TOOL_CACHE_ENABLED:
+                            _store_results_cache(
+                                "semgrep_server", semgrep_uncached_server, server_result
+                            )
+                    return results
 
                 semgrep_result, linter_result, codeql_result = await asyncio.gather(
                     _semgrep_or_empty(),
@@ -463,8 +530,6 @@ async def run_review(
                             len(semgrep_result),
                             len(findings_by_path),
                         )
-                    if config.TOOL_CACHE_ENABLED and semgrep_uncached:
-                        _store_results_cache("semgrep", semgrep_uncached, semgrep_result)
                 if isinstance(linter_result, BaseException):
                     logger.warning("Linters failed: %s", linter_result)
                     linter_issues_by_path = dict(linter_cached)

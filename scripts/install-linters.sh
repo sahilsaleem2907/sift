@@ -28,6 +28,10 @@ pip install --no-cache-dir ruff bandit
 echo "Installing npm global linters..."
 npm install -g eslint typescript stylelint markdownlint-cli
 
+# --- oxlint ---
+echo "Installing oxlint..."
+npm install -g oxlint
+
 # --- Ruby rubocop ---
 echo "Installing rubocop..."
 gem install rubocop --no-document

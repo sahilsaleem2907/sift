@@ -1,6 +1,7 @@
 """Run Semgrep on a set of file contents; return findings by path. Used for diff-only context."""
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,6 +10,27 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 SEMGREP_TIMEOUT = 120
+
+# Server-side path signals
+_SERVER_PATH_RE = re.compile(
+    r"(?:^|/)(?:pages/api|app/api|src/routes|src/controllers|src/middleware|src/handlers)(?:/|$)",
+    re.IGNORECASE,
+)
+# Server-side import / API signals
+_SERVER_IMPORT_RE = re.compile(
+    r"""from\s+['"]express['"]|require\s*\(\s*['"]express['"]\)|@nestjs/|"""
+    r"""from\s+['"]fastify['"]|from\s+['"]koa['"]|http\.createServer|app\.listen\s*\(""",
+    re.IGNORECASE,
+)
+
+
+def is_server_side_file(path: str, content: str) -> bool:
+    """True if path or content indicates server-side Node.js code."""
+    p = path.replace("\\", "/")
+    if _SERVER_PATH_RE.search(p):
+        return True
+    sample = (content or "")[:50000]
+    return bool(_SERVER_IMPORT_RE.search(sample))
 
 
 def _normalize_path(raw_path: str, root: Path) -> str:
@@ -88,21 +110,107 @@ def _parse_error(err: dict, root: Path) -> Optional[Tuple[str, dict]]:
     return (path_str, finding)
 
 
-def run_semgrep(path_to_content: Dict[str, str]) -> Dict[str, List[dict]]:
+def _build_semgrep_cmd(root: Path, extra_configs: List[str]) -> List[str]:
+    config_args = ["--config", "auto"]
+    for c in extra_configs:
+        config_args += ["--config", c]
+    return ["semgrep", "scan"] + config_args + ["--json", "--no-git-ignore", str(root)]
+
+
+def _parse_semgrep_output(
+    result: subprocess.CompletedProcess,
+    root: Path,
+    path_to_content: Dict[str, str],
+) -> Dict[str, List[dict]]:
+    if result.returncode not in (0, 1):
+        return {}
+
+    try:
+        data = json.loads(result.stdout) if result.stdout else {}
+    except json.JSONDecodeError as e:
+        logger.warning("Semgrep JSON parse failed: %s", e)
+        return {}
+
+    results = data.get("results") or []
+    errors = data.get("errors") or []
+    by_path: Dict[str, List[dict]] = {}
+    for r in results:
+        parsed = _parse_result(r, root)
+        if parsed:
+            path_str, finding = parsed
+            by_path.setdefault(path_str, []).append(finding)
+    for err in errors:
+        parsed = _parse_error(err, root)
+        if parsed:
+            path_str, finding = parsed
+            by_path.setdefault(path_str, []).append(finding)
+            logger.debug(
+                "Semgrep error (syntax/parse) added as finding: %s:%s — %s",
+                path_str,
+                finding.get("line"),
+                (finding.get("message") or "")[:80],
+            )
+
+    canonical_keys = list(path_to_content.keys())
+    remapped: Dict[str, List[dict]] = {}
+    for semgrep_path, findings in by_path.items():
+        norm = semgrep_path.replace("\\", "/")
+        matched = None
+        for key in canonical_keys:
+            key_norm = key.replace("\\", "/")
+            if norm == key_norm or norm.endswith("/" + key_norm):
+                matched = key
+                break
+        if matched:
+            remapped.setdefault(matched, []).extend(findings)
+        elif norm in canonical_keys:
+            remapped.setdefault(norm, []).extend(findings)
+    return remapped if remapped else by_path
+
+
+def _scan_semgrep(root: Path, extra_configs: List[str]) -> Optional[subprocess.CompletedProcess]:
+    """Run semgrep subprocess; return CompletedProcess or None on hard failure."""
+    try:
+        return subprocess.run(
+            _build_semgrep_cmd(root, extra_configs),
+            capture_output=True,
+            text=True,
+            timeout=SEMGREP_TIMEOUT,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        logger.debug("Semgrep not found in PATH; skipping Semgrep context")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("Semgrep scan timed out after %ss", SEMGREP_TIMEOUT)
+        return None
+    except Exception as e:
+        logger.warning("Semgrep scan failed: %s", e)
+        return None
+
+
+def run_semgrep(
+    path_to_content: Dict[str, str],
+    extra_configs: Optional[List[str]] = None,
+) -> Dict[str, List[dict]]:
     """Run Semgrep on the given path->content map. Returns path -> list of findings.
 
     Each finding has: line, message, severity, check_id, start, end, extra (full scope).
     Syntax/parsing errors from Semgrep's errors array are included as ERROR findings.
     If Semgrep is not available or fails, returns {} so the review can proceed without Semgrep context.
+
+    extra_configs: additional Semgrep registry packs (e.g. p/express, p/nodejs).
     """
     if not path_to_content:
         return {}
 
+    configs = list(extra_configs or [])
     paths_written = [p for p, c in path_to_content.items() if c]
     logger.debug(
-        "Semgrep input: scanning %d file(s): %s",
+        "Semgrep input: scanning %d file(s): %s (extra_configs=%s)",
         len(paths_written),
         paths_written,
+        configs,
     )
 
     with tempfile.TemporaryDirectory(prefix="sift_semgrep_") as tmpdir:
@@ -118,53 +226,26 @@ def run_semgrep(path_to_content: Dict[str, str]) -> Dict[str, List[dict]]:
                 logger.debug("Skip writing %s for Semgrep: %s", path, e)
                 continue
 
-        try:
-            result = subprocess.run(
-                ["semgrep", "scan", "--config", "auto", "--json", "--no-git-ignore", str(root)],
-                capture_output=True,
-                text=True,
-                timeout=SEMGREP_TIMEOUT,
-                cwd=str(root),
+        result = _scan_semgrep(root, configs)
+        if result is None:
+            return {}
+
+        if result.returncode not in (0, 1) and configs:
+            logger.warning(
+                "Semgrep exited with code %s (extra_configs=%s): %s; retrying with auto only",
+                result.returncode,
+                configs,
+                result.stderr,
             )
-        except FileNotFoundError:
-            logger.debug("Semgrep not found in PATH; skipping Semgrep context")
-            return {}
-        except subprocess.TimeoutExpired:
-            logger.warning("Semgrep scan timed out after %ss", SEMGREP_TIMEOUT)
-            return {}
-        except Exception as e:
-            logger.warning("Semgrep scan failed: %s", e)
-            return {}
+            result = _scan_semgrep(root, [])
+            if result is None:
+                return {}
 
         if result.returncode not in (0, 1):
             logger.warning("Semgrep exited with code %s: %s", result.returncode, result.stderr)
             return {}
 
-        try:
-            data = json.loads(result.stdout) if result.stdout else {}
-        except json.JSONDecodeError as e:
-            logger.warning("Semgrep JSON parse failed: %s", e)
-            return {}
-
-        results = data.get("results") or []
-        errors = data.get("errors") or []
-        by_path: Dict[str, List[dict]] = {}
-        for r in results:
-            parsed = _parse_result(r, root)
-            if parsed:
-                path_str, finding = parsed
-                by_path.setdefault(path_str, []).append(finding)
-        for err in errors:
-            parsed = _parse_error(err, root)
-            if parsed:
-                path_str, finding = parsed
-                by_path.setdefault(path_str, []).append(finding)
-                logger.debug(
-                    "Semgrep error (syntax/parse) added as finding: %s:%s — %s",
-                    path_str,
-                    finding.get("line"),
-                    (finding.get("message") or "")[:80],
-                )
+        by_path = _parse_semgrep_output(result, root, path_to_content)
         out_summary = {path: len(findings) for path, findings in by_path.items()}
         total = sum(out_summary.values())
         logger.debug(
@@ -186,19 +267,4 @@ def run_semgrep(path_to_content: Dict[str, str]) -> Dict[str, List[dict]]:
                     f.get("severity"),
                     msg,
                 )
-        # Rekey to path_to_content keys (e.g. src/extension.ts) so review_engine lookups succeed
-        canonical_keys = list(path_to_content.keys())
-        remapped: Dict[str, List[dict]] = {}
-        for semgrep_path, findings in by_path.items():
-            norm = semgrep_path.replace("\\", "/")
-            matched = None
-            for key in canonical_keys:
-                key_norm = key.replace("\\", "/")
-                if norm == key_norm or norm.endswith("/" + key_norm):
-                    matched = key
-                    break
-            if matched:
-                remapped.setdefault(matched, []).extend(findings)
-            elif norm in canonical_keys:
-                remapped.setdefault(norm, []).extend(findings)
-        return remapped if remapped else by_path
+        return by_path
