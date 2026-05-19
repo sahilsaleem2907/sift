@@ -38,7 +38,7 @@ Then output the JSON array after the reasoning block.
 Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
 {
   "line": <integer — must be a line number marked [L<n>] in the diff below>,
-  "severity": "bug" | "security" | "warning" | "suggestion",
+  "severity": "bug" | "security" | "warning" | "suggestion" | "informational",
   "title": "<10 words max>",
   "body": "<description of the issue>",
   "fix": "<optional: corrected code only, no diff markers>",
@@ -49,31 +49,39 @@ Rules:
 - "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
-- "confidence" 8-10 = definite issue; 5-7 = likely; 1-4 = speculative (prefer omitting low confidence).
+- "confidence" 8-10 = definite issue; 5-6 = possible but unverified → use "informational"; 1-4 = speculative, omit.
+- Use "informational" for findings sourced from tool output (Semgrep, linter) that you cannot independently verify from reading the changed code.
+- Use "informational" for technically correct code that is unrelated to the PR's stated intent (title/description). Do not elevate pre-existing issues to "warning" or above unless the PR directly touches the affected logic.
+- Findings with confidence 5–6 that you cannot confirm from the code alone must be "informational", not "warning" or above.
 - Return [] if there is nothing significant to report.
 """
 
 SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 # Match severity badge at start of comment body (text or shields.io image).
-_SUMMARY_SEVERITY_RE = re.compile(r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*(.*)")
-_SUMMARY_SHIELD_RE = re.compile(r"^!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*(.*)", re.DOTALL)
+_SUMMARY_SEVERITY_RE = re.compile(
+    r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\*\*\s*(.*)"
+)
+_SUMMARY_SHIELD_RE = re.compile(
+    r"^!\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\(https://[^)]+\)\s*(.*)",
+    re.DOTALL,
+)
 # Same shields/text badges anywhere in body (merged comments: "**Issues:**\n- ![BADGE]...")
 _SHIELD_ANYWHERE_RE = re.compile(
-    r"!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*([^\n]*)",
+    r"!\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\(https://[^)]+\)\s*([^\n]*)",
     re.IGNORECASE,
 )
 _TEXT_BADGE_ANYWHERE_RE = re.compile(
-    r"\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*([^\n]*)",
+    r"\*\*\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\*\*\s*([^\n]*)",
     re.IGNORECASE,
 )
 # GitHub may return HTML; badge alt text is often the severity label only.
 _HTML_IMG_ALT_SEV_RE = re.compile(
-    r'<img[^>]+alt=["\'](BUG|SECURITY|WARNING|SUGGESTION)["\']',
+    r'<img[^>]+alt=["\'](BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)["\']',
     re.IGNORECASE,
 )
 
-_SEVERITY_RANK = {"bug": 0, "security": 1, "warning": 2, "suggestion": 3}
+_SEVERITY_RANK = {"bug": 0, "security": 1, "warning": 2, "suggestion": 3, "informational": 4}
 
 
 def _strip_merge_issues_header(text: str) -> str:
@@ -225,6 +233,10 @@ _SEV_META = [
     ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-CC5500?style={_BADGE_STYLE})"),
     ("warning", f"![WARNING](https://img.shields.io/badge/WARNING-B8860B?style={_BADGE_STYLE})"),
     ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-2E5A8A?style={_BADGE_STYLE})"),
+    (
+        "informational",
+        f"![INFORMATIONAL](https://img.shields.io/badge/INFORMATIONAL-555555?style={_BADGE_STYLE})",
+    ),
 ]
 _SEV_BADGE_BY_KEY = {key: badge for key, badge in _SEV_META}
 
@@ -234,6 +246,7 @@ _SEV_SUMMARY_SPEC: Dict[str, Dict[str, str]] = {
     "security": {"label": "SECURITY", "message_color": "FF8C00", "label_color": "CC5500"},
     "warning": {"label": "WARNING", "message_color": "FFD700", "label_color": "B8860B"},
     "suggestion": {"label": "SUGGESTION", "message_color": "4A90D9", "label_color": "2E5A8A"},
+    "informational": {"label": "INFORMATIONAL", "message_color": "AAAAAA", "label_color": "555555"},
 }
 
 
@@ -344,10 +357,10 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
                 path, line_int, item.get("severity"), item.get("title"), confidence,
             )
-            if confidence < 4:
+            if confidence < 5:
                 skipped += 1
                 logger.debug(
-                    "LLM finding SKIPPED (confidence=%s < 4): file=%s line=%s title=%r",
+                    "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
                     confidence, path, line_int, item.get("title"),
                 )
                 continue
@@ -695,7 +708,13 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     if not comments:
         return "Sifted through the code and found no issues."
 
-    counts: Dict[str, int] = {"bug": 0, "security": 0, "warning": 0, "suggestion": 0}
+    counts: Dict[str, int] = {
+        "bug": 0,
+        "security": 0,
+        "warning": 0,
+        "suggestion": 0,
+        "informational": 0,
+    }
     by_path: Dict[str, List[Dict[str, Any]]] = {}
     for c in comments:
         path = c.get("path", "?")
@@ -725,6 +744,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     security_count = counts.get("security", 0)
     warning_count = counts.get("warning", 0)
     suggestion_count = counts.get("suggestion", 0)
+    informational_count = counts.get("informational", 0)
 
     if bug_count > 0 or security_count > 0:
         parts: List[str] = []
@@ -755,6 +775,15 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
             [
                 "> [!TIP]",
                 f"> {_summary_count_badge_markdown('suggestion', suggestion_count)} suggestion issue(s) available in the Files changed tab.",
+                "",
+            ]
+        )
+
+    if informational_count > 0:
+        lines.extend(
+            [
+                "> [!NOTE]",
+                f"> {_summary_count_badge_markdown('informational', informational_count)} informational note(s) available in the Files changed tab.",
                 "",
             ]
         )

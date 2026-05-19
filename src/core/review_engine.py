@@ -900,7 +900,7 @@ async def run_review(
                 # GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions.
                 # Inline comments remain posted via the Reviews API (Files changed tab).
                 summary_comment_id = await github.create_comment(owner, repo, pr_number, summary)
-                review_id = await github.create_pull_request_review(
+                _ = await github.create_pull_request_review(
                     owner,
                     repo,
                     pr_number,
