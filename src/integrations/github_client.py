@@ -249,6 +249,40 @@ class GitHubClient:
         )
         return review_id
 
+    async def set_commit_status(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        state: str,
+        description: str,
+        context: str = "sift/review",
+    ) -> None:
+        """Post a commit status to the GitHub Statuses API.
+
+        state: pending | success | failure | error
+        """
+        if not self._client:
+            raise RuntimeError("GitHubClient must be used as async context manager")
+        payload = {
+            "state": state,
+            "description": description[:140],
+            "context": context,
+        }
+        r = await self._client.post(
+            f"/repos/{owner}/{repo}/statuses/{sha}",
+            json=payload,
+        )
+        r.raise_for_status()
+        logger.info(
+            "Commit status posted: %s/%s@%s → %s (%s)",
+            owner,
+            repo,
+            sha[:7],
+            state,
+            context,
+        )
+
     async def get_authenticated_user_login(self) -> str:
         """Return the login for the authenticated user/bot."""
         if not self._client:

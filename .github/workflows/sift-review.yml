@@ -75,6 +75,12 @@ on:
       SIFT_SMART_ROUTING_ENABLED:
         required: false
         description: "SIFT_SMART_ROUTING_ENABLED — 1/true/yes for smart routing (default 1 if unset)"
+      SIFT_BLOCK_PRS_ENABLED:
+        required: false
+        description: "SIFT_BLOCK_PRS_ENABLED — 1/true/yes to post commit status and block merges (default 0 if unset)"
+      SIFT_BLOCK_ON_SEVERITIES:
+        required: false
+        description: "SIFT_BLOCK_ON_SEVERITIES — comma-separated severities that trigger block (default bug,security if unset)"
 
 jobs:
   review:
@@ -97,6 +103,8 @@ jobs:
           SIFT_CODEQL_ENABLED: ${{ secrets.SIFT_CODEQL_ENABLED }}
           SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
           SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
+          SIFT_BLOCK_PRS_ENABLED: ${{ secrets.SIFT_BLOCK_PRS_ENABLED }}
+          SIFT_BLOCK_ON_SEVERITIES: ${{ secrets.SIFT_BLOCK_ON_SEVERITIES }}
         run: |
           set -eo pipefail
           echo "::group::Review start diagnostics"
@@ -115,6 +123,8 @@ jobs:
           echo "SIFT_CODEQL_ENABLED=${SIFT_CODEQL_ENABLED:-0}"
           echo "SIFT_VECTOR_DB_ENABLED=${SIFT_VECTOR_DB_ENABLED:-0}"
           echo "SIFT_SMART_ROUTING_ENABLED=${SIFT_SMART_ROUTING_ENABLED:-1}"
+          echo "SIFT_BLOCK_PRS_ENABLED=${SIFT_BLOCK_PRS_ENABLED:-0}"
+          echo "SIFT_BLOCK_ON_SEVERITIES=${SIFT_BLOCK_ON_SEVERITIES:-bug,security}"
           echo "SWIFT_API_BACKEND_BASE_URL set: $([ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ] && echo yes || echo no)"
           echo "::endgroup::"
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -149,6 +159,8 @@ jobs:
             -e CODEQL_ENABLED="${SIFT_CODEQL_ENABLED:-0}" \
             -e VECTOR_DB_ENABLED="${SIFT_VECTOR_DB_ENABLED:-0}" \
             -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
+            -e SIFT_BLOCK_PRS_ENABLED="${SIFT_BLOCK_PRS_ENABLED:-0}" \
+            -e SIFT_BLOCK_ON_SEVERITIES="${SIFT_BLOCK_ON_SEVERITIES:-bug,security}" \
             "${SWIFT_ENV_ARGS[@]}" \
             "$IMAGE"
           echo "✅ docker run completed"

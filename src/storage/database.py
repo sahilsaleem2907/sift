@@ -287,7 +287,7 @@ def upsert_review_comment(
 ) -> None:
     """Insert or refresh inline comment metadata (severity/title) on each reaction sync."""
     sev = (severity or "suggestion").lower()[:32]
-    if sev not in ("bug", "security", "warning", "suggestion"):
+    if sev not in ("bug", "security", "warning", "suggestion", "informational"):
         sev = "suggestion"
     t = title
     if t and len(t) > 256:
@@ -349,7 +349,7 @@ def get_severity_feedback_summary(repo: str) -> Dict[str, Dict[str, int]]:
         else:
             continue
         sev = severity.lower()
-        if sev not in ("bug", "security", "warning", "suggestion"):
+        if sev not in ("bug", "security", "warning", "suggestion", "informational"):
             sev = "suggestion"
         if sev not in buckets:
             buckets[sev] = {"positive": 0, "negative": 0}

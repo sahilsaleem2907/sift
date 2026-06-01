@@ -49,6 +49,16 @@ _TOOL_CACHE_RAW = (os.environ.get("TOOL_CACHE_ENABLED") or "1").strip().lower()
 TOOL_CACHE_ENABLED = _TOOL_CACHE_RAW in ("1", "true", "yes")
 TOOL_CACHE_TTL_HOURS = int(os.environ.get("TOOL_CACHE_TTL_HOURS") or "24")
 
+# JS/TS ecosystem tools (default: all enabled)
+_OXLINT_RAW = (os.environ.get("OXLINT_ENABLED") or "1").strip().lower()
+OXLINT_ENABLED = _OXLINT_RAW in ("1", "true", "yes")
+_NPM_AUDIT_RAW = (os.environ.get("NPM_AUDIT_ENABLED") or "1").strip().lower()
+NPM_AUDIT_ENABLED = _NPM_AUDIT_RAW in ("1", "true", "yes")
+_YARN_AUDIT_RAW = (os.environ.get("YARN_AUDIT_ENABLED") or "1").strip().lower()
+YARN_AUDIT_ENABLED = _YARN_AUDIT_RAW in ("1", "true", "yes")
+_SEMGREP_FRAMEWORK_RAW = (os.environ.get("SEMGREP_FRAMEWORK_RULES_ENABLED") or "1").strip().lower()
+SEMGREP_FRAMEWORK_RULES_ENABLED = _SEMGREP_FRAMEWORK_RAW in ("1", "true", "yes")
+
 # Smart analysis routing (optional; default enabled)
 _SMART_ROUTING_RAW = (os.environ.get("SIFT_SMART_ROUTING_ENABLED") or "1").strip().lower()
 SIFT_SMART_ROUTING_ENABLED = _SMART_ROUTING_RAW in ("1", "true", "yes")
@@ -70,6 +80,17 @@ VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
 SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") or "10")
 SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
 SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
+
+# PR blocking via commit status (default: disabled)
+_BLOCK_PRS_RAW = (os.environ.get("SIFT_BLOCK_PRS_ENABLED") or "0").strip().lower()
+SIFT_BLOCK_PRS_ENABLED = _BLOCK_PRS_RAW in ("1", "true", "yes")
+SIFT_BLOCK_ON_SEVERITIES = [
+    s.strip().lower()
+    for s in (os.environ.get("SIFT_BLOCK_ON_SEVERITIES") or "bug,security").split(",")
+    if s.strip()
+]
+SIFT_BLOCK_MIN_FINDINGS = int(os.environ.get("SIFT_BLOCK_MIN_FINDINGS") or "1")
+SIFT_STATUS_CONTEXT = os.environ.get("SIFT_STATUS_CONTEXT") or "sift/review"
 
 
 def validate_required() -> None:

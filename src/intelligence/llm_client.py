@@ -25,44 +25,63 @@ Look specifically for:
 - Security issues (injection, auth bypass, improper validation)
 - Resource leaks (unclosed files/connections)
 - Type mismatches or wrong API usage
+- Function/type signature changes that could break callers
+- Missing error handling on new async or IO code paths
+- Coupling or abstraction violations (accessing internals, bypassing interface layers)
 
-Respond ONLY with a JSON array. No prose, no markdown fences around the array. Each element:
+If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
+
+Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
+(1) What semantically changed (2) Which call sites or error paths may be affected.
+Then output the JSON array after the reasoning block.
+
+Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
 {
   "line": <integer — must be a line number marked [L<n>] in the diff below>,
-  "severity": "bug" | "security" | "warning" | "suggestion",
+  "severity": "bug" | "security" | "warning" | "suggestion" | "informational",
   "title": "<10 words max>",
   "body": "<description of the issue>",
-  "fix": "<optional: corrected code only, no diff markers>"
+  "fix": "<optional: corrected code only, no diff markers>",
+  "confidence": <integer 1-10, your certainty this is a real issue>
 }
 
 Rules:
 - "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
+- "confidence" 8-10 = definite issue; 5-6 = possible but unverified → use "informational"; 1-4 = speculative, omit.
+- Use "informational" for findings sourced from tool output (Semgrep, linter) that you cannot independently verify from reading the changed code.
+- Use "informational" for technically correct code that is unrelated to the PR's stated intent (title/description). Do not elevate pre-existing issues to "warning" or above unless the PR directly touches the affected logic.
+- Findings with confidence 5–6 that you cannot confirm from the code alone must be "informational", not "warning" or above.
 - Return [] if there is nothing significant to report.
 """
 
-SUMMARIZE_SYSTEM = """Summarize the following inline review comments in a few sentences or bullet points for a pull request Conversation tab. Be brief and professional."""
+SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 # Match severity badge at start of comment body (text or shields.io image).
-_SUMMARY_SEVERITY_RE = re.compile(r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*(.*)")
-_SUMMARY_SHIELD_RE = re.compile(r"^!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*(.*)", re.DOTALL)
+_SUMMARY_SEVERITY_RE = re.compile(
+    r"^\*\*\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\*\*\s*(.*)"
+)
+_SUMMARY_SHIELD_RE = re.compile(
+    r"^!\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\(https://[^)]+\)\s*(.*)",
+    re.DOTALL,
+)
 # Same shields/text badges anywhere in body (merged comments: "**Issues:**\n- ![BADGE]...")
 _SHIELD_ANYWHERE_RE = re.compile(
-    r"!\[(BUG|SECURITY|WARNING|SUGGESTION)\]\(https://[^)]+\)\s*([^\n]*)",
+    r"!\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\(https://[^)]+\)\s*([^\n]*)",
     re.IGNORECASE,
 )
 _TEXT_BADGE_ANYWHERE_RE = re.compile(
-    r"\*\*\[(BUG|SECURITY|WARNING|SUGGESTION)\]\*\*\s*([^\n]*)",
+    r"\*\*\[(BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)\]\*\*\s*([^\n]*)",
     re.IGNORECASE,
 )
 # GitHub may return HTML; badge alt text is often the severity label only.
 _HTML_IMG_ALT_SEV_RE = re.compile(
-    r'<img[^>]+alt=["\'](BUG|SECURITY|WARNING|SUGGESTION)["\']',
+    r'<img[^>]+alt=["\'](BUG|SECURITY|WARNING|SUGGESTION|INFORMATIONAL)["\']',
     re.IGNORECASE,
 )
 
-_SEVERITY_RANK = {"bug": 0, "security": 1, "warning": 2, "suggestion": 3}
+_SEVERITY_RANK = {"bug": 0, "security": 1, "warning": 2, "suggestion": 3, "informational": 4}
 
 
 def _strip_merge_issues_header(text: str) -> str:
@@ -214,6 +233,10 @@ _SEV_META = [
     ("security", f"![SECURITY](https://img.shields.io/badge/SECURITY-CC5500?style={_BADGE_STYLE})"),
     ("warning", f"![WARNING](https://img.shields.io/badge/WARNING-B8860B?style={_BADGE_STYLE})"),
     ("suggestion", f"![SUGGESTION](https://img.shields.io/badge/SUGGESTION-2E5A8A?style={_BADGE_STYLE})"),
+    (
+        "informational",
+        f"![INFORMATIONAL](https://img.shields.io/badge/INFORMATIONAL-555555?style={_BADGE_STYLE})",
+    ),
 ]
 _SEV_BADGE_BY_KEY = {key: badge for key, badge in _SEV_META}
 
@@ -223,6 +246,7 @@ _SEV_SUMMARY_SPEC: Dict[str, Dict[str, str]] = {
     "security": {"label": "SECURITY", "message_color": "FF8C00", "label_color": "CC5500"},
     "warning": {"label": "WARNING", "message_color": "FFD700", "label_color": "B8860B"},
     "suggestion": {"label": "SUGGESTION", "message_color": "4A90D9", "label_color": "2E5A8A"},
+    "informational": {"label": "INFORMATIONAL", "message_color": "AAAAAA", "label_color": "555555"},
 }
 
 
@@ -314,6 +338,7 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     arr = _extract_json_array(text)
     if arr is not None and isinstance(arr, list):
         out: List[Dict[str, Any]] = []
+        skipped = 0
         for item in arr:
             if not isinstance(item, dict):
                 continue
@@ -324,9 +349,32 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 continue
             if line_int is None or line_int <= 0:
                 continue
+            try:
+                confidence = int(item.get("confidence", 7))
+            except (TypeError, ValueError):
+                confidence = 7
+            logger.debug(
+                "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
+                path, line_int, item.get("severity"), item.get("title"), confidence,
+            )
+            if confidence < 5:
+                skipped += 1
+                logger.debug(
+                    "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
+                    confidence, path, line_int, item.get("title"),
+                )
+                continue
             body = _format_structured_comment_body(item)
             if body.strip():
-                out.append({"line": line_int, "body": body})
+                out.append({
+                    "line": line_int,
+                    "body": body,
+                    "post_inline": True,
+                })
+        logger.debug(
+            "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
+            path, len(arr), len(out), skipped,
+        )
         if out:
             return out
         logger.debug("JSON array empty or invalid items for %s", path)
@@ -470,6 +518,30 @@ def _format_repo_preferences(prefs_text: str) -> str:
     return (prefs_text or "").strip()
 
 
+def _format_caller_context(caller_infos: List[Any]) -> str:
+    """Format PR-internal import/caller context for the LLM."""
+    if not caller_infos:
+        return ""
+    lines = [
+        "Other files in this PR import from changed modules below. "
+        "Check that usages in this file remain compatible with their modifications:",
+    ]
+    for info in caller_infos:
+        changed = getattr(info, "changed_path", None) or (
+            info.get("changed_path") if isinstance(info, dict) else "?"
+        )
+        names = getattr(info, "function_names", None)
+        if names is None and isinstance(info, dict):
+            names = info.get("function_names") or ()
+        names = tuple(names or ())
+        if names:
+            sym = ", ".join(f"`{n}`" for n in names)
+            lines.append(f"- `{changed}` — modified symbols: {sym}")
+        else:
+            lines.append(f"- `{changed}` — module was modified (verify imports and call compatibility)")
+    return "\n".join(lines)
+
+
 def _format_similar_snippets(matches: List[Any]) -> str:
     """Format vector-similarity matches into an LLM-friendly context block."""
     if not matches:
@@ -546,6 +618,12 @@ async def review_file(
         lc_block = _format_repo_preferences(labeled_comments)
         if lc_block:
             user_parts.append(lc_block)
+
+    caller_context = (pr_context or {}).get("caller_context")
+    if caller_context:
+        cc_block = _format_caller_context(caller_context)
+        if cc_block:
+            user_parts.append(cc_block)
 
     diff_intro = (
         f"File: {path}\n\n"
@@ -630,7 +708,13 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     if not comments:
         return "Sifted through the code and found no issues."
 
-    counts: Dict[str, int] = {"bug": 0, "security": 0, "warning": 0, "suggestion": 0}
+    counts: Dict[str, int] = {
+        "bug": 0,
+        "security": 0,
+        "warning": 0,
+        "suggestion": 0,
+        "informational": 0,
+    }
     by_path: Dict[str, List[Dict[str, Any]]] = {}
     for c in comments:
         path = c.get("path", "?")
@@ -660,6 +744,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     security_count = counts.get("security", 0)
     warning_count = counts.get("warning", 0)
     suggestion_count = counts.get("suggestion", 0)
+    informational_count = counts.get("informational", 0)
 
     if bug_count > 0 or security_count > 0:
         parts: List[str] = []
@@ -694,6 +779,15 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
             ]
         )
 
+    if informational_count > 0:
+        lines.extend(
+            [
+                "> [!NOTE]",
+                f"> {_summary_count_badge_markdown('informational', informational_count)} informational note(s) available in the Files changed tab.",
+                "",
+            ]
+        )
+
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -723,8 +817,27 @@ async def summarize_review(comments: List[Dict[str, Any]]) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
     comments: list of {path, line, body} (or at least body for each).
+    When >= 3 issues, prepends an LLM synthesis of cross-file patterns.
     """
-    return _build_structured_summary(comments)
+    structured = _build_structured_summary(comments)
+    if len(comments) < 3:
+        return structured
+    issue_lines = []
+    for c in comments:
+        path = c.get("path", "?")
+        line = c.get("line", "?")
+        body = (c.get("body") or "").strip()
+        if len(body) > 200:
+            body = body[:197] + "..."
+        issue_lines.append(f"- [{path}:{line}] {body}")
+    try:
+        raw = await _call_llm(SUMMARIZE_SYSTEM, "\n".join(issue_lines))
+        if raw and raw.strip():
+            synthesis = f"### Cross-file patterns\n\n{raw.strip()}\n\n---\n\n"
+            return synthesis + structured
+    except Exception as e:
+        logger.warning("LLM cross-file synthesis failed: %s", e)
+    return structured
 
 
 async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:
