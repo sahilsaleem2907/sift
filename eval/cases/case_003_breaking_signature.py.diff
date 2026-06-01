@@ -1,0 +1,7 @@
+diff --git a/app/api.py b/app/api.py
+--- a/app/api.py
++++ b/app/api.py
+@@ -1,4 +1,4 @@
+-def fetch_data(user_id, include_meta=False):
++def fetch_data(user_id, include_meta=False, force_refresh=True):
+     pass

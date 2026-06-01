@@ -9,54 +9,9 @@ from litellm import acompletion
 
 from src import config
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
+from src.intelligence.prompts import REVIEW_FILE_SYSTEM
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """You are a concise code reviewer. Given a git diff, provide a short professional review:
-- A few bullet points on correctness, style, and possible improvements.
-- Be brief and actionable. Do not repeat the diff."""
-
-REVIEW_FILE_SYSTEM = """You are a code reviewer focused on correctness. Your job is to find real bugs and issues.
-
-Look specifically for:
-- Logic errors, wrong conditions, off-by-one errors
-- Unhandled None/null dereferences
-- Unhandled exceptions or missing error handling
-- Security issues (injection, auth bypass, improper validation)
-- Resource leaks (unclosed files/connections)
-- Type mismatches or wrong API usage
-- Function/type signature changes that could break callers
-- Missing error handling on new async or IO code paths
-- Coupling or abstraction violations (accessing internals, bypassing interface layers)
-
-If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
-
-Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
-(1) What semantically changed (2) Which call sites or error paths may be affected.
-Then output the JSON array after the reasoning block.
-
-Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
-{
-  "line": <integer — must be a line number marked [L<n>] in the diff below>,
-  "severity": "bug" | "security" | "warning" | "suggestion" | "informational",
-  "title": "<10 words max>",
-  "body": "<description of the issue>",
-  "fix": "<optional: corrected code only, no diff markers>",
-  "confidence": <integer 1-10, your certainty this is a real issue>
-}
-
-Rules:
-- "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
-- Only report issues on changed lines (marked with +).
-- Omit "fix" if no clean fix is obvious.
-- "confidence" 8-10 = definite issue; 5-6 = possible but unverified → use "informational"; 1-4 = speculative, omit.
-- Use "informational" for findings sourced from tool output (Semgrep, linter) that you cannot independently verify from reading the changed code.
-- Use "informational" for technically correct code that is unrelated to the PR's stated intent (title/description). Do not elevate pre-existing issues to "warning" or above unless the PR directly touches the affected logic.
-- Findings with confidence 5–6 that you cannot confirm from the code alone must be "informational", not "warning" or above.
-- Return [] if there is nothing significant to report.
-"""
-
-SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(
@@ -164,17 +119,26 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
     return "\n".join(lines_out)
 
 
-async def _call_llm(system: str, user_content: str) -> str:
+async def _call_llm(
+    system: str,
+    user_content: str,
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> str:
     """Call configured LLM provider via LiteLLM; return assistant message content or empty string."""
-    response = await acompletion(
-        model=config.LLM_MODEL,
-        messages=[
+    kwargs: Dict[str, Any] = {
+        "model": model or config.LLM_MODEL,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ],
-        api_base=config.LLM_API_BASE or None,
-        timeout=120.0,
-    )
+        "api_base": api_base or config.LLM_API_BASE or None,
+        "timeout": 120.0,
+    }
+    if api_key:
+        kwargs["api_key"] = api_key
+    response = await acompletion(**kwargs)
     return (response.choices[0].message.content or "").strip()
 
 
@@ -816,41 +780,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
 async def summarize_review(comments: List[Dict[str, Any]]) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
-    comments: list of {path, line, body} (or at least body for each).
-    When >= 3 issues, prepends an LLM synthesis of cross-file patterns.
+    Cross-file insights are produced by the holistic pipeline pass (Phase 3) as inline
+    findings; this function only builds the structured summary table.
     """
-    structured = _build_structured_summary(comments)
-    if len(comments) < 3:
-        return structured
-    issue_lines = []
-    for c in comments:
-        path = c.get("path", "?")
-        line = c.get("line", "?")
-        body = (c.get("body") or "").strip()
-        if len(body) > 200:
-            body = body[:197] + "..."
-        issue_lines.append(f"- [{path}:{line}] {body}")
-    try:
-        raw = await _call_llm(SUMMARIZE_SYSTEM, "\n".join(issue_lines))
-        if raw and raw.strip():
-            synthesis = f"### Cross-file patterns\n\n{raw.strip()}\n\n---\n\n"
-            return synthesis + structured
-    except Exception as e:
-        logger.warning("LLM cross-file synthesis failed: %s", e)
-    return structured
-
-
-async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:
-    """Call Ollama to generate a code review for the given diff.
-
-    pr_context may contain "title" and "body" for the PR description.
-    Returns the model's review text. Kept for backward compatibility / fallback.
-    """
-    user_content = diff
-    if pr_context:
-        title = pr_context.get("title") or ""
-        body = pr_context.get("body") or ""
-        if title or body:
-            user_content = f"PR title: {title}\n\nPR description:\n{body}\n\n---\n\nDiff:\n{diff}"
-    raw = await _call_llm(SYSTEM_PROMPT, user_content)
-    return raw if raw else "Review could not be generated."
+    return _build_structured_summary(comments)

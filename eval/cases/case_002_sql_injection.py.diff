@@ -1,0 +1,8 @@
+diff --git a/app/db.py b/app/db.py
+--- a/app/db.py
++++ b/app/db.py
+@@ -1,5 +1,8 @@
+ def find_user(username: str):
+-    query = "SELECT * FROM users WHERE name = %s"
++    query = f"SELECT * FROM users WHERE name = '{username}'"
+     return execute(query)

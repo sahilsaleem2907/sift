@@ -1,0 +1,8 @@
+{
+  "id": "007_false_positive_correct_guard",
+  "description": "Correct None guard added — fix not a bug",
+  "path": "app/service.py",
+  "diff_file": "case_007_false_positive_correct_guard.py.diff",
+  "expected": [],
+  "false_positives": [2, 3]
+}

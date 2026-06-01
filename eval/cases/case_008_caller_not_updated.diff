@@ -1,0 +1,17 @@
+diff --git a/app/auth.py b/app/auth.py
+--- a/app/auth.py
++++ b/app/auth.py
+@@ -1,3 +1,3 @@
+-def verify_token(token: str) -> bool:
++def verify_token(token: str, strict: bool = True) -> dict:
+     pass
+diff --git a/app/api.py b/app/api.py
+--- a/app/api.py
++++ b/app/api.py
+@@ -1,4 +1,5 @@
++from app.auth import verify_token
++
+ def handle_request(token: str):
+-    if verify_token(token):
++    if verify_token(token):
+         pass

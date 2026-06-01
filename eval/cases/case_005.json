@@ -1,0 +1,8 @@
+{
+  "id": "005_false_positive_bait",
+  "description": "Trivial correct addition — should not flag issues",
+  "path": "app/utils.py",
+  "diff_file": "case_005_false_positive_bait.py.diff",
+  "expected": [],
+  "false_positives": [2, 3]
+}

@@ -1,0 +1,8 @@
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,4 +1,5 @@
+ def process(item):
++    if item is None:
++        return
+     print(item.value)

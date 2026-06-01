@@ -1,0 +1,15 @@
+{
+  "id": "002_sql_injection",
+  "description": "SQL built with f-string from user input",
+  "path": "app/db.py",
+  "diff_file": "case_002_sql_injection.py.diff",
+  "expected": [
+    {
+      "line_range": [2, 2],
+      "category": "security",
+      "min_impact": "high",
+      "note": "SQL injection via string interpolation"
+    }
+  ],
+  "false_positives": []
+}

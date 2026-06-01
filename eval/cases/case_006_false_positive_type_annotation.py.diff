@@ -1,0 +1,7 @@
+diff --git a/app/utils.py b/app/utils.py
+--- a/app/utils.py
++++ b/app/utils.py
+@@ -1,3 +1,3 @@
+-def get_name(user):
++def get_name(user: dict) -> str:
+     return user["name"]

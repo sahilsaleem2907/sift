@@ -1,0 +1,15 @@
+{
+  "id": "003_breaking_signature",
+  "description": "New required parameter added to public function signature",
+  "path": "app/api.py",
+  "diff_file": "case_003_breaking_signature.py.diff",
+  "expected": [
+    {
+      "line_range": [1, 1],
+      "category": "correctness",
+      "min_impact": "medium",
+      "note": "Breaking change for callers"
+    }
+  ],
+  "false_positives": []
+}

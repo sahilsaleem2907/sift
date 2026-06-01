@@ -1,0 +1,15 @@
+{
+  "id": "009_duplicate_logic",
+  "description": "Same validate_amount logic duplicated in orders.py and payments.py",
+  "path": "app/payments.py",
+  "diff_file": "case_009_duplicate_logic.diff",
+  "expected": [
+    {
+      "line_range": [1, 4],
+      "categories": ["design", "maintainability"],
+      "min_impact": "low",
+      "note": "Duplicated validation logic should be shared (design or maintainability)"
+    }
+  ],
+  "false_positives": [1, 2]
+}

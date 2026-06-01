@@ -92,6 +92,21 @@ SIFT_BLOCK_ON_SEVERITIES = [
 SIFT_BLOCK_MIN_FINDINGS = int(os.environ.get("SIFT_BLOCK_MIN_FINDINGS") or "1")
 SIFT_STATUS_CONTEXT = os.environ.get("SIFT_STATUS_CONTEXT") or "sift/review"
 
+# Review engine effort: low | balanced | high  (default: balanced)
+SIFT_REVIEW_EFFORT = (os.environ.get("SIFT_REVIEW_EFFORT") or "balanced").strip().lower()
+
+# Optional separate model for critic / holistic passes (defaults to LLM_MODEL when unset).
+SIFT_REVIEW_MODEL = os.environ.get("SIFT_REVIEW_MODEL") or None
+SIFT_REVIEW_MODEL_KEY = os.environ.get("SIFT_REVIEW_MODEL_KEY") or None
+_review_base = (os.environ.get("SIFT_REVIEW_MODEL_BASE_URL") or "").strip()
+SIFT_REVIEW_MODEL_BASE_URL = _review_base.rstrip("/") if _review_base else None
+
+# JSON object to hard-override capability detection for unknown / self-hosted models.
+SIFT_CAPABILITY_OVERRIDE = os.environ.get("SIFT_CAPABILITY_OVERRIDE") or None
+
+# Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
+SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""
@@ -102,6 +117,13 @@ def validate_required() -> None:
         _log.warning(
             "Neither SWIFT_API_BACKEND_BASE_URL nor SIFT_GITHUB_TOKEN is set; "
             "GitHub integration will not work for installation_id auth mode."
+        )
+    _valid_efforts = ("low", "balanced", "high")
+    if SIFT_REVIEW_EFFORT not in _valid_efforts:
+        _log.warning(
+            "SIFT_REVIEW_EFFORT=%r is not one of %s; falling back to 'balanced'.",
+            SIFT_REVIEW_EFFORT,
+            _valid_efforts,
         )
 
 
