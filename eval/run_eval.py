@@ -86,6 +86,7 @@ def _build_pr_meta(case: GoldenCase) -> PRMeta:
         import_graph=import_graph,
         mod_funcs_by_path=mod_funcs_by_path,
         raw_diffs=raw_diffs,
+        path_to_content=path_to_content,
     )
 
 
@@ -95,16 +96,17 @@ async def score_case(case: GoldenCase, plan, cap) -> dict:
         file_chunks = [(case.path, case.diff_text)]
 
     all_findings = []
+    pr_meta = _build_pr_meta(case)
     for path, file_diff in file_chunks:
         inp = FileReviewInput(
             path=path,
             file_diff=file_diff,
             pr_context={"title": case.description, "body": ""},
         )
-        per_file = await run_pipeline_per_file(inp, case.description, plan, cap)
+        per_file = await run_pipeline_per_file(
+            inp, case.description, plan, cap, pr_meta
+        )
         all_findings.extend(per_file)
-
-    pr_meta = _build_pr_meta(case)
     findings = await run_pipeline_holistic(all_findings, pr_meta, plan, cap)
 
     hits, misses, noise = 0, 0, 0

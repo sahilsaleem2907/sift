@@ -31,6 +31,7 @@ class PRMeta:
     # path -> unified diff text; used by holistic pass for code context when tree-sitter
     # extraction is unavailable (e.g. eval harness without full file content).
     raw_diffs: Optional[dict] = None
+    path_to_content: Optional[dict] = None
 
 
 async def run_pipeline_per_file(
@@ -38,11 +39,41 @@ async def run_pipeline_per_file(
     pr_title: str,
     plan: EffortPlan,
     cap: ModelCapability,
+    pr_meta: Optional[PRMeta] = None,
 ) -> list[Finding]:
     """Per-file candidates and optional critic (no holistic, no severity gate)."""
     from src.intelligence.passes.critic import critique, rule_dedupe
+    from src.intelligence.retrieval import build_context
 
-    candidates = await generate_candidates(file.file_diff, file.path, file.pr_context)
+    path_to_content = (pr_meta.path_to_content if pr_meta else None) or {}
+    mod_funcs_by_path = (pr_meta.mod_funcs_by_path if pr_meta else None) or {}
+    import_graph = (pr_meta.import_graph if pr_meta else None) or {}
+
+    retrieval_ctx = build_context(
+        file.path,
+        file.file_diff,
+        file.pr_context,
+        plan,
+        cap,
+        path_to_content,
+        mod_funcs_by_path,
+        import_graph,
+    )
+    enriched = {**(file.pr_context or {}), **retrieval_ctx.to_pr_context_dict()}
+
+    if plan.enable_agentic and cap.supports_function_calling:
+        from src.intelligence.passes.agentic import agentic_review
+
+        candidates = await agentic_review(
+            FileReviewInput(file.path, file.file_diff, enriched),
+            plan,
+            cap,
+            path_to_content,
+            mod_funcs_by_path,
+            retrieval_ctx,
+        )
+    else:
+        candidates = await generate_candidates(file.file_diff, file.path, enriched)
     logger.debug("[pipeline] %s: %d candidate(s)", file.path, len(candidates))
 
     use_llm_critic = plan.run_critic and candidates and bool(config.SIFT_REVIEW_MODEL)
@@ -109,5 +140,5 @@ async def run_pipeline(
     per_file: list[Finding] = []
     pr_title = pr_meta.title or ""
     for f in files:
-        per_file.extend(await run_pipeline_per_file(f, pr_title, plan, cap))
+        per_file.extend(await run_pipeline_per_file(f, pr_title, plan, cap, pr_meta))
     return await run_pipeline_holistic(per_file, pr_meta, plan, cap)

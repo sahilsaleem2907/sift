@@ -631,6 +631,14 @@ async def run_review(
                     file_chunks, path_to_content, mod_funcs_by_path
                 )
 
+                pr_meta_for_files = PRMeta(
+                    title=(pr_context or {}).get("title") or "",
+                    body=(pr_context or {}).get("body") or "",
+                    import_graph=pr_import_graph,
+                    mod_funcs_by_path=mod_funcs_by_path,
+                    path_to_content=path_to_content,
+                )
+
                 _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)
 
                 async def _process_file(path_diff_list: List[Tuple[str, str]]) -> List[Finding]:
@@ -841,6 +849,7 @@ async def run_review(
                                 (pr_context or {}).get("title") or "",
                                 _effort_plan,
                                 _model_cap,
+                                pr_meta_for_files,
                             )
                         except Exception as e:
                             logger.warning("review_file failed for %s: %s", path0, e)
@@ -879,6 +888,7 @@ async def run_review(
                     import_graph=pr_import_graph,
                     mod_funcs_by_path=mod_funcs_by_path,
                     raw_diffs={p: fd for p, fd in file_chunks if fd.strip()},
+                    path_to_content=path_to_content,
                 )
                 try:
                     all_findings = await run_pipeline_holistic(

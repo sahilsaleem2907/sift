@@ -81,6 +81,24 @@ on:
       SIFT_BLOCK_ON_SEVERITIES:
         required: false
         description: "SIFT_BLOCK_ON_SEVERITIES — comma-separated severities that trigger block (default bug,security if unset)"
+      SIFT_REVIEW_EFFORT:
+        required: false
+        description: "SIFT_REVIEW_EFFORT — low | balanced | high (default balanced)"
+      SIFT_REVIEW_MODEL:
+        required: false
+        description: "Separate LLM model for critic/holistic passes (e.g. anthropic/claude-haiku-4-5)"
+      SIFT_REVIEW_MODEL_KEY:
+        required: false
+        description: "API key for SIFT_REVIEW_MODEL; passed directly as LiteLLM api_key"
+      SIFT_REVIEW_MODEL_BASE_URL:
+        required: false
+        description: "Base URL for SIFT_REVIEW_MODEL (e.g. custom OpenAI-compatible endpoint)"
+      SIFT_CAPABILITY_OVERRIDE:
+        required: false
+        description: "JSON capability override for SIFT_REVIEW_MODEL (context_window, supports_function_calling, supports_reasoning)"
+      SIFT_AGENTIC_MAX_STEPS:
+        required: false
+        description: "Max tool-call steps in the agentic review loop (default 4)"
 
 jobs:
   review:
@@ -105,6 +123,12 @@ jobs:
           SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
           SIFT_BLOCK_PRS_ENABLED: ${{ secrets.SIFT_BLOCK_PRS_ENABLED }}
           SIFT_BLOCK_ON_SEVERITIES: ${{ secrets.SIFT_BLOCK_ON_SEVERITIES }}
+          SIFT_REVIEW_EFFORT: ${{ secrets.SIFT_REVIEW_EFFORT }}
+          SIFT_REVIEW_MODEL: ${{ secrets.SIFT_REVIEW_MODEL }}
+          SIFT_REVIEW_MODEL_KEY: ${{ secrets.SIFT_REVIEW_MODEL_KEY }}
+          SIFT_REVIEW_MODEL_BASE_URL: ${{ secrets.SIFT_REVIEW_MODEL_BASE_URL }}
+          SIFT_CAPABILITY_OVERRIDE: ${{ secrets.SIFT_CAPABILITY_OVERRIDE }}
+          SIFT_AGENTIC_MAX_STEPS: ${{ secrets.SIFT_AGENTIC_MAX_STEPS }}
         run: |
           set -eo pipefail
           echo "::group::Review start diagnostics"
@@ -125,6 +149,12 @@ jobs:
           echo "SIFT_SMART_ROUTING_ENABLED=${SIFT_SMART_ROUTING_ENABLED:-1}"
           echo "SIFT_BLOCK_PRS_ENABLED=${SIFT_BLOCK_PRS_ENABLED:-0}"
           echo "SIFT_BLOCK_ON_SEVERITIES=${SIFT_BLOCK_ON_SEVERITIES:-bug,security}"
+          echo "SIFT_REVIEW_EFFORT=${SIFT_REVIEW_EFFORT:-balanced}"
+          echo "SIFT_REVIEW_MODEL set: $([ -n "${SIFT_REVIEW_MODEL:-}" ] && echo yes || echo no)"
+          echo "SIFT_REVIEW_MODEL_KEY length: ${#SIFT_REVIEW_MODEL_KEY}"
+          echo "SIFT_REVIEW_MODEL_BASE_URL set: $([ -n "${SIFT_REVIEW_MODEL_BASE_URL:-}" ] && echo yes || echo no)"
+          echo "SIFT_CAPABILITY_OVERRIDE set: $([ -n "${SIFT_CAPABILITY_OVERRIDE:-}" ] && echo yes || echo no)"
+          echo "SIFT_AGENTIC_MAX_STEPS=${SIFT_AGENTIC_MAX_STEPS:-4}"
           echo "SWIFT_API_BACKEND_BASE_URL set: $([ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ] && echo yes || echo no)"
           echo "::endgroup::"
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -161,6 +191,12 @@ jobs:
             -e SIFT_SMART_ROUTING_ENABLED="${SIFT_SMART_ROUTING_ENABLED:-1}" \
             -e SIFT_BLOCK_PRS_ENABLED="${SIFT_BLOCK_PRS_ENABLED:-0}" \
             -e SIFT_BLOCK_ON_SEVERITIES="${SIFT_BLOCK_ON_SEVERITIES:-bug,security}" \
+            -e SIFT_REVIEW_EFFORT="${SIFT_REVIEW_EFFORT:-balanced}" \
+            -e SIFT_REVIEW_MODEL="${SIFT_REVIEW_MODEL}" \
+            -e SIFT_REVIEW_MODEL_KEY="${SIFT_REVIEW_MODEL_KEY}" \
+            -e SIFT_REVIEW_MODEL_BASE_URL="${SIFT_REVIEW_MODEL_BASE_URL}" \
+            -e SIFT_CAPABILITY_OVERRIDE="${SIFT_CAPABILITY_OVERRIDE}" \
+            -e SIFT_AGENTIC_MAX_STEPS="${SIFT_AGENTIC_MAX_STEPS:-4}" \
             "${SWIFT_ENV_ARGS[@]}" \
             "$IMAGE"
           echo "✅ docker run completed"

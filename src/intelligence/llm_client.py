@@ -589,6 +589,20 @@ async def review_file(
         if cc_block:
             user_parts.append(cc_block)
 
+    semantic_ba = (pr_context or {}).get("semantic_before_after")
+    if semantic_ba and str(semantic_ba).strip():
+        user_parts.append(
+            "Semantic before/after of changed functions in this file:\n"
+            + str(semantic_ba).strip()
+        )
+
+    callee_sigs = (pr_context or {}).get("callee_signatures")
+    if callee_sigs and str(callee_sigs).strip():
+        user_parts.append(
+            "Callee definitions from other files in this PR:\n"
+            + str(callee_sigs).strip()
+        )
+
     diff_intro = (
         f"File: {path}\n\n"
         "Diff (legend: '-' = old/removed, '+' = new/added). Each added line is annotated with [L<n>] — use that integer as \"line\" in your JSON."
