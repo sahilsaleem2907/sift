@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Optional
 
 from src import config
@@ -27,11 +28,23 @@ def _impact_rank(impact: Impact) -> int:
 
 
 def rule_dedupe(findings: list[Finding]) -> list[Finding]:
-    """Drop duplicate (path, line) keys, keeping the highest-impact finding."""
+    """Drop duplicate (path, line) keys, keeping the highest-impact finding.
+
+    critic_exempt findings always survive deduplication — they are never replaced
+    by a lower-confidence LLM finding on the same line.
+    """
     seen: dict[tuple[str, int], Finding] = {}
     for f in findings:
         key = (f.path, f.line)
-        if key not in seen or _impact_rank(f.impact) < _impact_rank(seen[key].impact):
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = f
+        elif f.critic_exempt and not existing.critic_exempt:
+            # Static-tool finding always wins over an LLM finding on the same line
+            seen[key] = f
+        elif not f.critic_exempt and existing.critic_exempt:
+            pass  # keep existing static-tool finding
+        elif _impact_rank(f.impact) < _impact_rank(existing.impact):
             seen[key] = f
     return list(seen.values())
 
@@ -55,20 +68,92 @@ def _parse_certainty(value: Any, default: Certainty) -> Certainty:
 
 
 def _apply_verdict(finding: Finding, verdict_obj: dict) -> Optional[Finding]:
-    if (verdict_obj.get("verdict") or "keep").lower() == "drop":
+    verdict = (verdict_obj.get("verdict") or "keep").lower()
+    # Hard guard: security or high-impact findings can never be dropped by the critic —
+    # only certainty can be downgraded. This prevents the self-negating loop where the
+    # same model that generated a finding talks itself out of it on the second call.
+    if verdict == "drop" and (
+        finding.category == "security" or finding.impact == Impact.CRITICAL
+    ):
+        logger.debug(
+            "[critic] DROP overridden to KEEP for security/critical finding line=%d", finding.line
+        )
+        verdict = "keep"
+    if verdict == "drop":
         return None
+    rated_impact = _parse_impact(verdict_obj.get("impact"), finding.impact)
+
     return Finding(
         path=finding.path,
         line=finding.line,
         title=finding.title,
         body=finding.body,
-        impact=_parse_impact(verdict_obj.get("impact"), finding.impact),
+        impact=rated_impact,
         certainty=_parse_certainty(verdict_obj.get("certainty"), finding.certainty),
         category=finding.category,
         origin=finding.origin,
         fix=finding.fix,
         post_inline=finding.post_inline,
     )
+
+
+def _clamp_certainty_for_critic(findings: list[Finding]) -> list[Finding]:
+    """Raise certainty to at least LIKELY for security/high-impact findings.
+
+    The generator prompt can self-downgrade security findings to SPECULATIVE when
+    it's uncertain. The critic then sees SPECULATIVE and is tempted to drop. This
+    clamp breaks that self-defeating loop: the critic must make an affirmative
+    factual case to drop, not just exploit a low certainty score.
+
+    Only affects non-exempt findings passed to the critic; does not change the
+    final Finding stored in output (certainty is re-rated by the critic anyway).
+    """
+    clamped = []
+    for f in findings:
+        if (
+            f.certainty == Certainty.SPECULATIVE
+            and (f.category == "security" or f.impact in (Impact.CRITICAL, Impact.HIGH))
+        ):
+            f = Finding(
+                path=f.path,
+                line=f.line,
+                title=f.title,
+                body=f.body,
+                impact=f.impact,
+                certainty=Certainty.LIKELY,
+                category=f.category,
+                origin=f.origin,
+                fix=f.fix,
+                post_inline=f.post_inline,
+                critic_exempt=f.critic_exempt,
+            )
+        clamped.append(f)
+    return clamped
+
+
+_BADGE_RE = re.compile(
+    r"!\[[^\]]+\]\(https://img\.shields\.io/badge/[^)]+\)\s*",
+    re.IGNORECASE,
+)
+_TITLE_RE = re.compile(
+    r"!\[[^\]]+\]\(https://img\.shields\.io/badge/[^)]+\)\s*([^\n]+)",
+    re.IGNORECASE,
+)
+
+
+def _plain_body(body: str) -> str:
+    """Strip badge image markdown from a comment body to get plain text."""
+    return _BADGE_RE.sub("", body or "").strip()
+
+
+def _title_from_body(body: str) -> str:
+    """Extract the title that follows the badge on the first line of the body."""
+    m = _TITLE_RE.search(body or "")
+    if m:
+        return m.group(1).strip()
+    # fallback: first non-empty line after stripping badges
+    plain = _plain_body(body)
+    return plain.splitlines()[0].strip()[:80] if plain else "(no title)"
 
 
 def _critic_llm_kwargs() -> dict[str, Any]:
@@ -90,12 +175,18 @@ async def critique_batched(
     if not findings:
         return []
 
+    # critic_exempt findings (auto-promoted static tool findings) bypass the critic
+    exempt = [f for f in findings if f.critic_exempt]
+    to_critique = _clamp_certainty_for_critic([f for f in findings if not f.critic_exempt])
+    if not to_critique:
+        return exempt
+
     items = "\n".join(
         f"[{i}] line={f.line} impact={f.impact.value} certainty={f.certainty.value} "
-        f"category={f.category}\n"
-        f"     title: {f.title or '(see body)'}\n"
-        f"     body: {(f.body or '')[:300]}"
-        for i, f in enumerate(findings)
+        f"category={f.category} origin={f.origin}\n"
+        f"     title: {f.title or _title_from_body(f.body)}\n"
+        f"     description: {_plain_body(f.body)[:400]}"
+        for i, f in enumerate(to_critique)
     )
     user_content = f"PR title: {pr_title}\n\nDiff:\n{diff}\n\nProposed findings:\n{items}"
 
@@ -110,7 +201,7 @@ async def critique_batched(
                 continue
 
     kept: list[Finding] = []
-    for i, f in enumerate(findings):
+    for i, f in enumerate(to_critique):
         v = verdict_map.get(i)
         if v is None:
             kept.append(f)
@@ -133,12 +224,13 @@ async def critique_batched(
         )
 
     logger.info(
-        "[critic] batched: %d in -> %d kept (%d dropped)",
-        len(findings),
+        "[critic] batched: %d in -> %d kept (%d dropped) + %d exempt",
+        len(to_critique),
         len(kept),
-        len(findings) - len(kept),
+        len(to_critique) - len(kept),
+        len(exempt),
     )
-    return kept
+    return exempt + kept
 
 
 def _extract_json_object(raw: str) -> Optional[dict]:
@@ -188,17 +280,23 @@ async def critique_per_finding(
     if not findings:
         return []
 
+    exempt = [f for f in findings if f.critic_exempt]
+    to_critique = _clamp_certainty_for_critic([f for f in findings if not f.critic_exempt])
+    if not to_critique:
+        return exempt
+
     kept: list[Finding] = []
     llm_kw = _critic_llm_kwargs()
-    for idx, f in enumerate(findings):
+    for idx, f in enumerate(to_critique):
         if idx > 0 and config.SIFT_LLM_REQUEST_DELAY > 0:
             await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
         user_content = (
             f"PR title: {pr_title}\n\nDiff:\n{diff}\n\n"
             f"Proposed finding:\n"
-            f"line={f.line} impact={f.impact.value} certainty={f.certainty.value}\n"
-            f"title: {f.title or '(see body)'}\n"
-            f"body: {f.body}"
+            f"line={f.line} impact={f.impact.value} certainty={f.certainty.value} "
+            f"category={f.category} origin={f.origin}\n"
+            f"title: {f.title or _title_from_body(f.body)}\n"
+            f"description: {_plain_body(f.body)[:400]}"
         )
         raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
         v = _extract_json_object(raw)
@@ -218,12 +316,13 @@ async def critique_per_finding(
         logger.debug("[critic] KEEP line=%d (per-finding)", updated.line)
 
     logger.info(
-        "[critic] per-finding: %d in -> %d kept (%d dropped)",
-        len(findings),
+        "[critic] per-finding: %d in -> %d kept (%d dropped) + %d exempt",
+        len(to_critique),
         len(kept),
-        len(findings) - len(kept),
+        len(to_critique) - len(kept),
+        len(exempt),
     )
-    return kept
+    return exempt + kept
 
 
 async def critique(

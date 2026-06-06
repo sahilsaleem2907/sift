@@ -63,7 +63,10 @@ async def test_review_holistic_returns_findings():
     digest = PRDigest(
         title="sig change",
         body="",
-        changed_functions=[{"path": "auth.py", "name": "verify", "lines": "1-3"}],
+        changed_functions=[
+            {"path": "auth.py", "name": "verify", "lines": "1-3"},
+            {"path": "app/api.py", "name": "handler", "lines": "4-8"},
+        ],
         import_edges=[{"importer": "api.py", "imports_from": "auth.py", "symbols": ["verify"]}],
         per_file_findings=[],
     )

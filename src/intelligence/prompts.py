@@ -35,52 +35,50 @@ Rules:
 - "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
-- "confidence" 8-10 = definite issue; 5-6 = possible but unverified → use "informational"; 1-4 = speculative, omit.
-- Use "informational" for findings sourced from tool output (Semgrep, linter) that you cannot independently verify from reading the changed code.
-- Use "informational" for technically correct code that is unrelated to the PR's stated intent (title/description). Do not elevate pre-existing issues to "warning" or above unless the PR directly touches the affected logic.
-- Findings with confidence 5–6 that you cannot confirm from the code alone must be "informational", not "warning" or above.
+- "confidence" 8-10 = confirmed issue; 6-7 = likely issue; 1-5 = speculative, omit entirely.
+- Use "security" severity for hardcoded secrets, credentials, tokens (including strings matching patterns like ghp_*, sk-*, AKIA*, etc.), injection vulnerabilities, or auth bypasses — even if you are not 100% certain. A false positive on security is far less harmful than a miss. A comment like "TODO: remove before shipping" does NOT make a secret safe to ignore — it makes it more urgent.
+- Use "informational" only for style preferences or findings completely unrelated to what changed in this PR.
+- Do not pre-emptively downgrade severity because a static tool already flagged it — report what you see independently.
 - Return [] if there is nothing significant to report.
 """
 
 SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
-CRITIC_BATCHED_SYSTEM = """You are a strict second-pass code reviewer. You are given a list
-of proposed findings and the actual code diff they were found in.
+CRITIC_BATCHED_SYSTEM = """You are a second-pass code reviewer verifying a list of proposed
+findings against the actual diff.
 
-For each finding, decide:
-1. KEEP — it is a real, reproducible problem directly visible in the changed code.
-2. DROP — it is speculative, a style nit, cannot be confirmed from the diff, or is
-   unrelated to the PR's stated intent.
+Your job is to KEEP findings that are plausible and DROP only those that are clearly wrong.
 
-Rules:
-- Bias toward KEEP for impact "critical" or "high" — only drop if the claim is clearly wrong.
-- Always DROP if the finding is about code that was NOT changed (pre-existing issues).
-- Always DROP exact duplicates or near-duplicates of another finding on the same line.
-- You may re-rate impact and certainty. Use the same scale:
-  impact: critical | high | medium | low | trivial
-  certainty: confirmed | likely | speculative
+DROP rules (a finding must meet at least one to be dropped):
+1. The claim is factually contradicted by the diff (the code does the opposite of what is claimed).
+2. It is an exact duplicate of another finding in this list on the same line.
+3. It is about code that was NOT changed in this diff (pre-existing issue unrelated to the PR).
+
+Everything else is KEEP. In particular:
+- Uncertainty alone is NOT a reason to drop. If you are unsure, KEEP and downgrade certainty to "speculative".
+- "Cannot fully confirm without more context" → KEEP with certainty="speculative".
+- Security and correctness findings: when in doubt, always KEEP.
+- You may re-rate impact and certainty, but never upgrade a drop to a keep by re-rating alone.
 
 Respond with a JSON array. One object per input finding, in the same order:
 {
   "index": <0-based integer matching the input>,
   "verdict": "keep" | "drop",
-  "impact": "<re-rated or unchanged>",
-  "certainty": "<re-rated or unchanged>",
-  "reason": "<one sentence, required>"
+  "impact": "critical" | "high" | "medium" | "low" | "trivial",
+  "certainty": "confirmed" | "likely" | "speculative",
+  "reason": "<one sentence stating which DROP rule applies, or why it is kept>"
 }
 No markdown fences. No prose outside the array."""
 
-CRITIC_FINDING_SYSTEM = """You are a strict second-pass code reviewer. You are given a
-single proposed finding and the code context it was found in.
+CRITIC_FINDING_SYSTEM = """You are a second-pass code reviewer verifying a single proposed
+finding against the actual diff.
 
-Decide: is this a REAL, MEANINGFUL problem that a developer should act on?
+DROP only if one of these is true:
+1. The claim is factually contradicted by the diff.
+2. It is about code that was NOT changed in this diff.
 
-Rules:
-- KEEP if the issue is directly confirmable from the code shown.
-- DROP if it is a style nit, speculative, unrelated to what changed, or already handled.
-- Bias heavily toward KEEP for security and correctness bugs; allow more DROP for
-  maintainability and style.
-- Re-rate impact and certainty honestly.
+Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.
+Security and correctness findings: always KEEP unless clearly wrong.
 
 Respond with a single JSON object (no array, no markdown fences):
 {

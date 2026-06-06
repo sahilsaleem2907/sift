@@ -61,6 +61,14 @@ async def run_pipeline_per_file(
     )
     enriched = {**(file.pr_context or {}), **retrieval_ctx.to_pr_context_dict()}
 
+    # Auto-promote ERROR/secret static-tool findings before LLM generation
+    from src.intelligence.passes.static_promote import promote_static_findings
+    semgrep_raw = (file.pr_context or {}).get("semgrep_findings") or []
+    codeql_raw = (file.pr_context or {}).get("codeql_findings") or []
+    promoted = await promote_static_findings(file.path, file.file_diff, semgrep_raw, codeql_raw)
+    if promoted:
+        logger.info("[pipeline] %s: %d static finding(s) auto-promoted", file.path, len(promoted))
+
     if plan.enable_agentic and cap.supports_function_calling:
         from src.intelligence.passes.agentic import agentic_review
 
@@ -74,19 +82,25 @@ async def run_pipeline_per_file(
         )
     else:
         candidates = await generate_candidates(file.file_diff, file.path, enriched)
-    logger.debug("[pipeline] %s: %d candidate(s)", file.path, len(candidates))
+    logger.debug("[pipeline] %s: %d candidate(s) + %d promoted", file.path, len(candidates), len(promoted))
 
-    use_llm_critic = plan.run_critic and candidates and bool(config.SIFT_REVIEW_MODEL)
+    # Merge promoted static findings in before the critic so rule_dedupe can
+    # resolve any overlap between static and LLM findings on the same line.
+    candidates = promoted + candidates
+
+    # Run critic when plan calls for it — falls back to primary model when no
+    # separate SIFT_REVIEW_MODEL is configured (previously this was silently skipped).
+    use_llm_critic = plan.run_critic and bool(candidates)
     if use_llm_critic:
+        if not config.SIFT_REVIEW_MODEL:
+            logger.debug(
+                "[pipeline] %s: SIFT_REVIEW_MODEL not set, critic using primary model",
+                file.path,
+            )
         candidates = await critique(
             candidates, file.file_diff, pr_title, plan, cap
         )
         logger.debug("[pipeline] %s: %d after critic", file.path, len(candidates))
-    elif plan.run_critic and candidates and not config.SIFT_REVIEW_MODEL:
-        logger.debug(
-            "[pipeline] %s: SIFT_REVIEW_MODEL not set, using rule_dedupe",
-            file.path,
-        )
 
     # Always collapse duplicate (path, line) findings, keeping the highest impact.
     # The LLM critic verifies/re-rates but does not dedupe, so a generator that emits
@@ -108,6 +122,15 @@ async def run_pipeline_holistic(
     from src.intelligence.passes.severity import apply_severity_gate
 
     all_findings = list(all_per_file_findings)
+
+    # Deterministic intra-PR duplicate logic detection — runs regardless of
+    # import edges, no LLM required, findings are critic_exempt.
+    if pr_meta.mod_funcs_by_path:
+        from src.intelligence.passes.duplicate_detect import detect_duplicate_functions
+        dup_findings = await detect_duplicate_functions(pr_meta.mod_funcs_by_path)
+        if dup_findings:
+            logger.info("[pipeline] duplicate_detect: %d finding(s)", len(dup_findings))
+            all_findings.extend(dup_findings)
 
     if plan.run_holistic:
         digest = build_digest(pr_meta, all_findings)

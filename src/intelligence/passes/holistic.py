@@ -249,9 +249,17 @@ def _parse_holistic_response(raw: str) -> list[Finding]:
 
 
 def _should_skip_holistic(digest: PRDigest) -> bool:
-    """Skip when fewer than two files changed and no import edges."""
+    """Skip when there are no real cross-file relationships to reason about.
+
+    Multiple files in a diff is not sufficient — the holistic pass is only
+    meaningful when files actually import each other (import_edges) or when
+    the same function appears across files (suggesting interface drift).
+    Without import edges, the pass generates spurious cross-file findings.
+    """
+    if not digest.import_edges:
+        return True
     paths = {cf["path"] for cf in digest.changed_functions}
-    if len(paths) < 2 and not digest.import_edges:
+    if len(paths) < 2:
         return True
     return False
 

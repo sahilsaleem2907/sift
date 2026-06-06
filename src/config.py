@@ -16,12 +16,15 @@ SWIFT_API_BACKEND_BASE_URL = os.environ.get("SWIFT_API_BACKEND_BASE_URL")
 SIFT_GITHUB_TOKEN = os.environ.get("SIFT_GITHUB_TOKEN") or None
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
-# LLM provider (LiteLLM): model string and optional api_base
+# LLM provider (LiteLLM): model string and optional api_base / api_key
 LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/llama3.2")
 # Custom base URL for any LiteLLM provider that needs it (e.g. Ollama, Azure OpenAI, self-hosted
 # gateways). Prefer LLM_API_BASE; else SIFT_LLM_API_BASE (GitHub Actions secret passthrough).
 _llm_base = (os.environ.get("LLM_API_BASE") or "").strip() or (os.environ.get("SIFT_LLM_API_BASE") or "").strip()
 LLM_API_BASE = _llm_base.rstrip("/") if _llm_base else None
+# Explicit API key for the primary model. When set, passed directly to LiteLLM so it takes
+# precedence over provider-specific env vars (needed when using a custom api_base like OpenRouter).
+LLM_API_KEY = (os.environ.get("LLM_API_KEY") or "").strip() or None
 
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -102,7 +105,7 @@ _review_base = (os.environ.get("SIFT_REVIEW_MODEL_BASE_URL") or "").strip()
 SIFT_REVIEW_MODEL_BASE_URL = _review_base.rstrip("/") if _review_base else None
 
 # JSON object to hard-override capability detection for unknown / self-hosted models.
-SIFT_CAPABILITY_OVERRIDE = os.environ.get("SIFT_CAPABILITY_OVERRIDE") or None
+SIFT_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_CAPABILITY_OVERRIDE") or "").strip() or None
 
 # Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
 SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")

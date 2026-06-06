@@ -10,6 +10,10 @@ def apply_severity_gate(findings: list[Finding], plan: EffortPlan) -> list[Findi
     _ = plan
     out: list[Finding] = []
     for f in findings:
+        if f.critic_exempt:
+            # Static-tool findings are pre-confirmed; skip all noise filtering
+            out.append(f)
+            continue
         if f.impact == Impact.TRIVIAL:
             continue
         if f.certainty == Certainty.SPECULATIVE and f.impact == Impact.LOW:

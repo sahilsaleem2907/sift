@@ -21,6 +21,7 @@ class ExpectedFinding:
     categories: tuple[str, ...]
     min_impact: str
     note: str = ""
+    must_find: bool = False  # if True, target hit-rate is 100% across all runs
 
 
 @dataclass
@@ -42,6 +43,7 @@ class GoldenCase:
                 categories=_as_categories(e.get("category") or e.get("categories")),
                 min_impact=e["min_impact"],
                 note=e.get("note", ""),
+                must_find=bool(e.get("must_find", False)),
             )
             for e in d["expected"]
         ]

@@ -7,7 +7,7 @@
     {
       "line_range": [1, 1],
       "category": "correctness",
-      "min_impact": "medium",
+      "min_impact": "low",
       "note": "Breaking change for callers"
     }
   ],

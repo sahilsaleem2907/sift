@@ -43,6 +43,7 @@ class Finding:
     origin: str
     fix: Optional[str] = None
     post_inline: bool = True
+    critic_exempt: bool = False  # True = skip critic + noise gate; used for auto-promoted static findings
 
     def severity(self) -> str:
         """Derive the legacy 5-tier severity label from impact × certainty."""
