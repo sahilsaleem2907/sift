@@ -5,7 +5,11 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import httpx
+import litellm
 from litellm import acompletion
+
+litellm.suppress_debug_info = True
 
 from src import config
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
@@ -125,19 +129,53 @@ async def _call_llm(
     model: Optional[str] = None,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
+    temperature: float = 0.0,
 ) -> str:
-    """Call configured LLM provider via LiteLLM; return assistant message content or empty string."""
+    """Call configured LLM provider; return assistant message content or empty string."""
+    resolved_base = api_base or config.LLM_API_BASE or None
+    resolved_model = model or config.LLM_MODEL
+    resolved_key = api_key or config.LLM_API_KEY or None
+
+    # When both a custom base and key are provided, call the OpenAI-compatible endpoint
+    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth.
+    if resolved_key and resolved_base:
+        import asyncio as _asyncio
+        raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
+        base = resolved_base.rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        url = f"{base}/chat/completions"
+        payload = {
+            "model": raw_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": temperature,
+        }
+        headers = {"Authorization": f"Bearer {resolved_key}"}
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.debug("429 rate-limit, retrying in %ss", wait)
+                await _asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return (resp.json()["choices"][0]["message"]["content"] or "").strip()
+        resp.raise_for_status()  # final attempt exhausted
+
     kwargs: Dict[str, Any] = {
-        "model": model or config.LLM_MODEL,
+        "model": resolved_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ],
-        "api_base": api_base or config.LLM_API_BASE or None,
+        "api_base": resolved_base,
         "timeout": 120.0,
+        "temperature": temperature,
     }
-    if api_key:
-        kwargs["api_key"] = api_key
     response = await acompletion(**kwargs)
     return (response.choices[0].message.content or "").strip()
 
@@ -148,6 +186,19 @@ _LINE_REF_RE = re.compile(
     r"(?:^|\n)\s*(?:(?:Line|line|L)\s*|#\s*|(?:at|on)\s+line\s+)(\d+)\s*[:\.\-]?\s*",
     re.IGNORECASE,
 )
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove <thinking>…</thinking> and <reasoning>…</reasoning> blocks.
+
+    Thinking/reasoning models (DeepSeek, Qwen3, o-series) emit these before
+    their actual output. They confuse JSON parsers because the prose often
+    contains '[', '{', ']', '}' characters.
+    """
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
 
 
 def _strip_diff_markers_from_code_block(content: str) -> str:
@@ -237,7 +288,14 @@ def _format_structured_comment_body(item: Dict[str, Any]) -> str:
     badge = _SEV_BADGE_BY_KEY.get(severity, _SEV_BADGE_BY_KEY["suggestion"])
     title = (item.get("title") or "").strip() or "Issue"
     body_text = (item.get("body") or "").strip()
-    fix = (item.get("fix") or "").strip()
+    _fix_raw = item.get("fix") or ""
+    if isinstance(_fix_raw, dict):
+        # Model returned {"before": "...", "after": "..."} or similar — render as before/after
+        before = (_fix_raw.get("before") or "").strip()
+        after = (_fix_raw.get("after") or _fix_raw.get("after_fix") or "").strip()
+        fix = f"Before:\n{before}\n\nAfter:\n{after}" if before or after else str(_fix_raw)
+    else:
+        fix = str(_fix_raw).strip()
     parts = [f"{badge} {title}"]
     if body_text:
         parts.append("\n\n" + body_text)
@@ -247,16 +305,13 @@ def _format_structured_comment_body(item: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _extract_json_array(raw: str) -> Optional[List[Any]]:
-    """Extract a JSON array from raw LLM output (may be wrapped in prose or markdown)."""
-    text = raw.strip()
-    # Find first '[' and last ']' to get the array slice
-    start = text.find("[")
-    if start < 0:
-        return None
+def _balanced_array_end(text: str, start: int) -> int:
+    """Return the index just past the ']' that closes the '[' at `start`, or -1.
+
+    String-aware: brackets inside quoted strings don't affect nesting depth.
+    """
     depth = 0
-    end = -1
-    in_string = None
+    in_string: Optional[str] = None
     i = start
     while i < len(text):
         c = text[i]
@@ -270,26 +325,44 @@ def _extract_json_array(raw: str) -> Optional[List[Any]]:
             continue
         if c in ('"', "'"):
             in_string = c
-            i += 1
-            continue
-        if c == "[":
+        elif c == "[":
             depth += 1
-            i += 1
-            continue
-        if c == "]":
+        elif c == "]":
             depth -= 1
             if depth == 0:
-                end = i + 1
-                break
-            i += 1
-            continue
+                return i + 1
         i += 1
-    if end < 0:
-        return None
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError:
-        return None
+    return -1
+
+
+def _extract_json_array(raw: str) -> Optional[List[Any]]:
+    """Extract a JSON array from raw LLM output.
+
+    Robust against reasoning models: first strips <think>/<thinking>/<reasoning>
+    blocks, then tries each '[' as a candidate start and returns the first
+    balanced slice that parses as a JSON *list*. This survives prose that
+    contains stray brackets (e.g. "[L10]" line references), markdown fences, and
+    leading commentary before the real array.
+
+    Returns None when no list can be extracted. Callers should WARNING-log when
+    the raw input was non-empty but this returns None — that signals a parse
+    failure (output received but unusable), not a genuinely empty result.
+    """
+    text = _strip_thinking_blocks(raw)
+    search_from = 0
+    while True:
+        start = text.find("[", search_from)
+        if start < 0:
+            return None
+        end = _balanced_array_end(text, start)
+        if end > 0:
+            try:
+                parsed = json.loads(text[start:end])
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return parsed
+        search_from = start + 1
 
 
 def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
@@ -343,10 +416,44 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
             return out
         logger.debug("JSON array empty or invalid items for %s", path)
 
-    # Fallback: freeform "Line N:" parsing
+    # Fallback 1: tab-separated format "[L<n>]\t<severity>\t<title>\t<body>"
+    # Some models (e.g. qwen3-coder-next) emit this instead of JSON.
+    _TAB_LINE_RE = re.compile(r"^\[L(\d+)\]\t(.+)$", re.MULTILINE)
+    tab_matches = _TAB_LINE_RE.findall(text)
+    if tab_matches:
+        out = []
+        for line_str, rest in tab_matches:
+            try:
+                line_int = int(line_str)
+            except ValueError:
+                continue
+            parts = rest.split("\t", 2)
+            severity = parts[0].strip() if len(parts) > 0 else "warning"
+            title    = parts[1].strip() if len(parts) > 1 else rest.strip()
+            body_txt = parts[2].strip() if len(parts) > 2 else ""
+            body = _format_structured_comment_body({
+                "severity": severity,
+                "title": title,
+                "body": body_txt or title,
+            })
+            if body.strip():
+                out.append({"line": line_int, "body": body, "post_inline": True})
+                logger.debug("LLM tab-format finding: file=%s line=%s sev=%s title=%r", path, line_int, severity, title)
+        if out:
+            return out
+
+    # Fallback 2: freeform "Line N:" parsing
     matches = list(_LINE_REF_RE.finditer(text))
     if not matches:
-        logger.debug("No line references found in review for %s", path)
+        # Non-empty model output that yielded no findings via ANY parser is a
+        # parse failure, not a genuine empty result. Log loudly with a snippet
+        # so silent zero-finding reviews are visible in the server log.
+        logger.warning(
+            "Review parse FAILURE for %s: received %d chars of model output but "
+            "extracted no findings (no JSON array, tab-format, or line refs). "
+            "Raw head: %r",
+            path, len(raw), raw.strip()[:300],
+        )
         return []
     out = []
     for i, m in enumerate(matches):
