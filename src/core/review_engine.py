@@ -11,6 +11,7 @@ from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
 from src.core.linter_runner import run_linters, _detect_linter
 from src.core.semgrep_runner import is_server_side_file, run_semgrep
+from src.core.secret_scan import scan_diff_for_secrets
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.analysis_routing import (
@@ -767,6 +768,18 @@ async def run_review(
                         ast_diff_result = None
 
                     caller_context = pr_import_graph.get(path0)
+
+                    # Augment semgrep findings with built-in regex secret scan.
+                    # Fires regardless of whether Semgrep is installed or which
+                    # ruleset it uses — findings are semgrep-shaped so they flow
+                    # through promote_static_findings as CRITICAL + critic_exempt.
+                    builtin_secret_findings = scan_diff_for_secrets(file_diff)
+                    if builtin_secret_findings:
+                        logger.debug(
+                            "[secret_scan] %s: %d built-in secret finding(s)",
+                            path0, len(builtin_secret_findings),
+                        )
+                    semgrep_for_llm = semgrep_for_llm + builtin_secret_findings
 
                     file_pr_context = {
                         **(pr_context or {}),
