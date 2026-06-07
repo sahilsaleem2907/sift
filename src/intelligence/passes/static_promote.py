@@ -36,16 +36,18 @@ _SECRET_RULE_SUBSTRINGS = (
 
 _ENRICH_SYSTEM = """You are a code review assistant. You are given a list of security or
 error findings detected by a static analysis tool. For each finding, write a concise,
-developer-friendly explanation and (where obvious) a suggested fix.
+developer-friendly title, explanation, and (where obvious) a suggested fix.
 
 Rules:
 - Do NOT change the severity, category, or verdict — the tool has already confirmed these.
 - Do NOT drop any finding. You must return one entry per input finding.
+- Title: max 5 words, specific to the finding (e.g. "Hardcoded GitHub token", "Syntax error in registerCommand").
 - Keep body to 1-3 sentences. Fix is optional; omit if no clean fix is obvious.
 
 Respond with a JSON array. One object per input finding, in the same order:
 {
   "index": <0-based integer>,
+  "title": "<max 5 word title>",
   "body": "<improved explanation>",
   "fix": "<suggested fix or empty string>"
 }
@@ -91,10 +93,12 @@ def should_auto_promote(f: dict) -> bool:
     return sev in _AUTO_PROMOTE_SEVERITIES or _is_secret_rule(rule_id)
 
 
-def _build_finding(f: dict, path: str, origin: str, body: str, fix: str) -> Finding:
+def _build_finding(f: dict, path: str, origin: str, body: str, fix: str, title: str = "") -> Finding:
     impact = _tool_finding_impact(f)
     category = _tool_finding_category(f)
-    title = (f.get("check_id") or f.get("rule_id") or origin).split(".")[-1][:60]
+    # Use enriched title if provided; fall back to rule-ID last segment.
+    rule_id_title = (f.get("check_id") or f.get("rule_id") or origin).split(".")[-1][:60]
+    title = (title.strip() or rule_id_title)[:60]
 
     # Derive the severity label so promoted findings get the same badge as LLM
     # findings — security → SECURITY, high correctness → BUG, etc.
@@ -127,13 +131,15 @@ async def _enrich_batch(
     path: str,
     origin: str,
     diff: str,
-) -> list[tuple[str, str]]:
-    """Call LLM once to improve body/fix for a batch. Returns list of (body, fix) tuples.
+) -> list[dict]:
+    """Call LLM once to improve title/body/fix for a batch. Returns list of dicts.
 
+    Each dict has keys: "body", "fix", "title".
     Falls back to raw tool messages on any failure — reporting is never blocked.
     """
+    _fallback = [{"body": _raw_body(f, origin), "fix": "", "title": ""} for f in raw_findings]
     if not config.LLM_MODEL:
-        return [(_raw_body(f, origin), "") for f in raw_findings]
+        return _fallback
 
     items = "\n".join(
         f'[{i}] rule={f.get("check_id") or f.get("rule_id") or ""} '
@@ -155,7 +161,7 @@ async def _enrich_batch(
         )
     except Exception as exc:
         logger.warning("[static_promote] enrich LLM call failed (%s); using raw messages", exc)
-        return [(_raw_body(f, origin), "") for f in raw_findings]
+        return _fallback
 
     # Use the shared hardened extractor — strips reasoning blocks and survives
     # prose/markdown around the array (same failure mode that broke candidates).
@@ -166,7 +172,7 @@ async def _enrich_batch(
             "JSON array extracted; using raw tool messages. Raw head: %r",
             path, len(raw or ""), (raw or "").strip()[:300],
         )
-        return [(_raw_body(f, origin), "") for f in raw_findings]
+        return _fallback
     index_map = {int(e["index"]): e for e in parsed if isinstance(e, dict) and "index" in e}
 
     result = []
@@ -175,10 +181,12 @@ async def _enrich_batch(
         if entry:
             body = (entry.get("body") or "").strip() or _raw_body(f, origin)
             fix = (entry.get("fix") or "").strip()
+            title = (entry.get("title") or "").strip()[:60]
         else:
             body = _raw_body(f, origin)
             fix = ""
-        result.append((body, fix))
+            title = ""
+        result.append({"body": body, "fix": fix, "title": title})
     return result
 
 
@@ -216,24 +224,29 @@ async def promote_static_findings(
     semgrep_batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == "semgrep"]
     codeql_batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == "codeql"]
 
-    enriched: dict[int, tuple[str, str]] = {}
+    enriched: dict[int, dict] = {}
 
     if semgrep_batch:
         raw_fs = [f for f, _ in semgrep_batch]
-        bodies_fixes = await _enrich_batch(raw_fs, path, "semgrep", file_diff)
-        for (_, idx), (body, fix) in zip(semgrep_batch, bodies_fixes):
-            enriched[idx] = (body, fix)
+        enrich_results = await _enrich_batch(raw_fs, path, "semgrep", file_diff)
+        for (_, idx), entry in zip(semgrep_batch, enrich_results):
+            enriched[idx] = entry
 
     if codeql_batch:
         raw_fs = [f for f, _ in codeql_batch]
-        bodies_fixes = await _enrich_batch(raw_fs, path, "codeql", file_diff)
-        for (_, idx), (body, fix) in zip(codeql_batch, bodies_fixes):
-            enriched[idx] = (body, fix)
+        enrich_results = await _enrich_batch(raw_fs, path, "codeql", file_diff)
+        for (_, idx), entry in zip(codeql_batch, enrich_results):
+            enriched[idx] = entry
 
     findings = []
     for idx, (f, origin) in enumerate(to_promote):
-        body, fix = enriched.get(idx, (_raw_body(f, origin), ""))
-        findings.append(_build_finding(f, path, origin, body, fix))
+        entry = enriched.get(idx, {"body": _raw_body(f, origin), "fix": "", "title": ""})
+        findings.append(_build_finding(
+            f, path, origin,
+            body=entry["body"],
+            fix=entry["fix"],
+            title=entry.get("title", ""),
+        ))
         logger.debug(
             "[static_promote] promoted line=%s impact=%s category=%s origin=%s rule=%s",
             f.get("line"), findings[-1].impact.value, findings[-1].category,
