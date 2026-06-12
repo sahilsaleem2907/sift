@@ -224,7 +224,8 @@ async def critique_batched(
         )
 
     logger.info(
-        "[critic] batched: %d in -> %d kept (%d dropped) + %d exempt",
+        "[critic] batched (model=%s): %d in -> %d kept (%d dropped) + %d exempt",
+        config.SIFT_REVIEW_MODEL or config.LLM_MODEL,
         len(to_critique),
         len(kept),
         len(to_critique) - len(kept),

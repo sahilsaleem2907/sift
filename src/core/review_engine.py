@@ -981,6 +981,8 @@ async def run_review(
                         summary,
                         comment_id=summary_comment_id,
                         paths=[p for p, _ in file_chunks],
+                        candidate_model=config.LLM_MODEL,
+                        critic_model=config.SIFT_REVIEW_MODEL or config.LLM_MODEL,
                     )
                 except Exception as e:
                     logger.warning("Failed to store review in DB: %s", e)

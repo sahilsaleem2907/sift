@@ -43,10 +43,39 @@ def init_db() -> None:
     engine = _get_engine()
     Base.metadata.create_all(bind=engine)
     logger.info("DB tables created or already exist")
+    _add_missing_columns(engine)
 
     if config.VECTOR_DB_ENABLED:
         from src.storage.vector_store import init_vector_db
         init_vector_db()
+
+
+def _add_missing_columns(engine) -> None:
+    """One-off, idempotent migration: add columns that create_all won't add to
+    pre-existing tables. Safe to run on every startup."""
+    from sqlalchemy import inspect as sa_inspect
+
+    wanted = {
+        "reviews": {
+            "candidate_model": "VARCHAR(256)",
+            "critic_model": "VARCHAR(256)",
+        },
+    }
+    inspector = sa_inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, columns in wanted.items():
+            if table not in existing_tables:
+                continue
+            present = {c["name"] for c in inspector.get_columns(table)}
+            for col, ddl in columns.items():
+                if col in present:
+                    continue
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+                    logger.info("Added column %s.%s", table, col)
+                except Exception as e:
+                    logger.warning("Could not add column %s.%s: %s", table, col, e)
 
 
 @contextmanager
@@ -71,6 +100,8 @@ def store_review(
     review_body: str,
     comment_id: Optional[int] = None,
     paths: Optional[List[str]] = None,
+    candidate_model: Optional[str] = None,
+    critic_model: Optional[str] = None,
 ) -> Optional[int]:
     """Insert a review row. Truncate body if needed. Optionally store paths for feedback loop.
     Returns review_id if paths were provided (needed for store_review_files), else None."""
@@ -84,6 +115,8 @@ def store_review(
             installation_id=installation_id,
             review_body=body,
             comment_id=comment_id,
+            candidate_model=candidate_model,
+            critic_model=critic_model,
         )
         session.add(review)
         session.flush()  # get review.id
@@ -364,6 +397,47 @@ def get_severity_feedback_summary(repo: str) -> Dict[str, Dict[str, int]]:
             continue
         net = pos - neg
         out[sev] = {"positive": pos, "negative": neg, "net": net}
+    return out
+
+
+def get_model_feedback_summary(repo: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    """Net reaction signal per candidate model, for per-model capability tracking.
+
+    Joins inline-comment reactions to the review that produced them and groups by
+    Review.candidate_model. A model that consistently draws negative reactions is a
+    fitness signal that it is a poor fit for the candidate role. Optionally scoped to
+    a single repo.
+    """
+    positive_reactions = frozenset({"+1", "heart", "hooray", "rocket"})
+    negative_reactions = frozenset({"-1", "confused"})
+
+    with session_scope() as session:
+        stmt = (
+            select(Review.candidate_model, FeedbackEvent.reaction_content)
+            .join(FeedbackEvent, FeedbackEvent.review_id == Review.id)
+            .where(
+                FeedbackEvent.event_type == "reaction",
+                FeedbackEvent.is_inline_comment.is_(True),
+                Review.candidate_model.isnot(None),
+            )
+        )
+        if repo:
+            stmt = stmt.where(Review.repo == repo)
+        rows = session.execute(stmt).all()
+
+    out: Dict[str, Dict[str, int]] = {}
+    for model, reaction_content in rows:
+        if not model or not reaction_content:
+            continue
+        if reaction_content in positive_reactions:
+            key = "positive"
+        elif reaction_content in negative_reactions:
+            key = "negative"
+        else:
+            continue
+        bucket = out.setdefault(model, {"positive": 0, "negative": 0, "net": 0})
+        bucket[key] += 1
+        bucket["net"] = bucket["positive"] - bucket["negative"]
     return out
 
 

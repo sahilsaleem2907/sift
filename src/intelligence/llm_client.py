@@ -478,10 +478,23 @@ def _format_file_context(file_context: Dict[str, Any]) -> str:
     path = file_context.get("path") or "?"
     content = (file_context.get("content") or "").strip()
     ranges = file_context.get("ranges") or []
-    if not content or not ranges:
+    if not content:
         return ""
     lines = content.splitlines()
-    out_lines: List[str] = [
+    # When the file is small enough, render it in full so the model can verify
+    # cross-references (e.g. whether an import is used elsewhere) instead of
+    # guessing from excerpts. Above the cap, fall back to the changed ranges only.
+    if len(lines) <= config.SIFT_FULL_FILE_RENDER_MAX_LINES:
+        out_lines: List[str] = [
+            "Full file (read-only, for understanding the change):",
+            f"File: {path}",
+        ]
+        for i, line in enumerate(lines):
+            out_lines.append(f"  {i + 1:4d} | {line}")
+        return "\n".join(out_lines).strip()
+    if not ranges:
+        return ""
+    out_lines = [
         "Surrounding context (read-only, for understanding the change):",
         f"File: {path}",
     ]

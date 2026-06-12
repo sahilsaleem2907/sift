@@ -37,6 +37,15 @@ Rules:
 - Omit "fix" if no clean fix is obvious.
 - "confidence" 8-10 = confirmed issue; 6-7 = likely issue; 1-5 = speculative, omit entirely.
 - Use "security" severity for hardcoded secrets, credentials, tokens (including strings matching patterns like ghp_*, sk-*, AKIA*, etc.), injection vulnerabilities, or auth bypasses — even if you are not 100% certain. A false positive on security is far less harmful than a miss. A comment like "TODO: remove before shipping" does NOT make a secret safe to ignore — it makes it more urgent.
+- Secrets: flag a secret ONLY when a literal credential VALUE appears in the diff (a quoted key/token/password, e.g. "ghp_abc123...", "sk-...", "AKIA...", a PEM "-----BEGIN ... PRIVATE KEY-----" block). A *reference* to a secret is NOT a vulnerability and must NEVER be flagged as exposure — this includes ${{ secrets.NAME }} in GitHub Actions, secrets passed through to a reusable/called workflow or function, os.environ[...]/process.env.X, and vault/config/secrets-manager lookups. Resolving a secret from an external store is the correct, secure pattern.
+- GitHub Actions workflow files (.github/workflows/*.yml): ${{ ... }} is GitHub Actions EXPRESSION/template syntax, evaluated by the runner BEFORE the shell starts — it is NOT Bash. Do NOT report it as a Bash syntax error, "unbalanced braces", "malformed snippet", or similar; the double braces are correct. Likewise, literal text like <unset>, <empty>, or <redacted> inside a quoted echo string (e.g. "${VAR:-<unset>}") is valid Bash, not an "unexpected <" or a broken here-doc/redirection. HOWEVER: ${{ ... }} values interpolated directly into a `run:` script are a real risk — but severity depends on whether the context is attacker-controllable:
+  * "security" (confirmed script-injection): contexts an external contributor can control by submitting a PR or posting a comment — e.g. ${{ github.head_ref }}, ${{ github.event.pull_request.head.ref }}, ${{ github.event.*.title }}, ${{ github.event.*.body }}, ${{ github.event.comment.body }}, ${{ github.event.review.body }}, ${{ github.event.issue.* }}, ${{ github.event.*.ref }}.
+  * "suggestion" (hardening, not exploitable): trusted server-side values the attacker cannot influence — e.g. ${{ github.repository }}, ${{ github.repository_owner }}, ${{ github.run_id }}, ${{ github.sha }}, ${{ github.actor }}, numeric event fields such as ${{ github.event.pull_request.number }}.
+  * "suggestion" (caller-dependent): ${{ inputs.* }} in a reusable workflow where no visible caller is passing attacker-controlled data — flag as defense-in-depth hardening, not a confirmed vulnerability.
+  In all cases the fix is to pass the value through an env: variable and reference "$ENVVAR" in the shell script instead.
+- Do NOT report "unused import", "dead code", "unreachable code", "undefined name", or "remove this symbol/variable" findings. These belong to the static linters (ruff, semgrep), which analyze the entire file deterministically; you see only excerpts and will be wrong. If a symbol looks unused in the diff, assume it is used elsewhere in the file.
+- Never narrate a correct change. If the diff already does the right thing, say nothing about it. Do not post comments that merely describe, restate, or approve what the change does — only report actual problems.
+- Naming/convention: an identifier that is off-convention but used *consistently* throughout the changed code (e.g. a SWIFT_ prefix where the codebase convention is SIFT_) is a "suggestion", NOT a "bug". Report it as a naming/consistency observation only when you can describe a concrete consequence (e.g. "a misnamed env var silently resolves to empty at runtime"). Pure naming inconsistency with no functional consequence is never a bug.
 - Use "informational" only for style preferences or findings completely unrelated to what changed in this PR.
 - Do not pre-emptively downgrade severity because a static tool already flagged it — report what you see independently.
 - Return [] if there is nothing significant to report.
@@ -51,6 +60,16 @@ Your job is to KEEP findings that are plausible and DROP only those that are cle
 
 DROP rules (a finding must meet at least one to be dropped):
 1. The claim is factually contradicted by the diff (the code does the opposite of what is claimed).
+   For "missing check / missing validation / unhandled return / not checked before use" findings,
+   trace the control flow in the shown diff first: scan the lines just above and below the cited
+   line for a guard (an if/return/raise/early-exit) that already handles the case. A check placed a
+   few lines after the cited line still covers it — if such a guard exists, the finding is
+   contradicted by the diff and you must DROP it.
+   For "this will raise / crash / throw" findings (e.g. KeyError, NoneType, IndexError), check the
+   exact cited operation in the diff: if it uses a safe idiom that prevents the error — dict.get(key)
+   or dict.get(key, default) instead of dict[key], a guarded access, a try/except, an `or default`
+   fallback, or assignment (LHS subscript like d[k] = ... never raises KeyError) — the claim is
+   contradicted and you must DROP it.
 2. It is an exact duplicate of another finding in this list on the same line.
 3. It is about code that was NOT changed in this diff (pre-existing issue unrelated to the PR).
 
@@ -74,7 +93,14 @@ CRITIC_FINDING_SYSTEM = """You are a second-pass code reviewer verifying a singl
 finding against the actual diff.
 
 DROP only if one of these is true:
-1. The claim is factually contradicted by the diff.
+1. The claim is factually contradicted by the diff. For "missing check / missing validation /
+   unhandled return" findings, first trace the control flow in the shown diff — scan the lines
+   just above and below the cited line for a guard (if/return/raise/early-exit) that already
+   handles the case. A check a few lines after the cited line still covers it; if such a guard
+   exists, DROP. For "this will raise / crash / throw" findings (KeyError, NoneType, etc.), verify
+   the cited operation: if it uses a safe idiom that prevents the error — dict.get(key[, default])
+   instead of dict[key], a guarded access, try/except, an `or default` fallback, or an assignment
+   (LHS subscript d[k] = ... never raises KeyError) — DROP.
 2. It is about code that was NOT changed in this diff.
 
 Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.

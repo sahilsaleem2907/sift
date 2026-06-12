@@ -110,6 +110,12 @@ SIFT_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_CAPABILITY_OVERRIDE") or "").st
 # Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
 SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")
 
+# Per-file reviewer: render the whole file as context when it is at or under this
+# many lines; above it, fall back to rendering only the changed line ranges.
+# Whole-file context lets the model verify cross-references (e.g. that an import is
+# used elsewhere) instead of guessing from excerpts.
+SIFT_FULL_FILE_RENDER_MAX_LINES = int(os.environ.get("SIFT_FULL_FILE_RENDER_MAX_LINES") or "800")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""

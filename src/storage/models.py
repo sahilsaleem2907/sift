@@ -23,6 +23,9 @@ class Review(Base):
     review_body: Mapped[str] = mapped_column(Text, nullable=False)
     # GitHub issue comment id created for the PR summary (conversation/feedback sync).
     comment_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Models that produced this review — for per-model capability tracking.
+    candidate_model: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    critic_model: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
