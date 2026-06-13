@@ -5,58 +5,17 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import httpx
+import litellm
 from litellm import acompletion
+
+litellm.suppress_debug_info = True
 
 from src import config
 from src.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
+from src.intelligence.prompts import REVIEW_FILE_SYSTEM
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """You are a concise code reviewer. Given a git diff, provide a short professional review:
-- A few bullet points on correctness, style, and possible improvements.
-- Be brief and actionable. Do not repeat the diff."""
-
-REVIEW_FILE_SYSTEM = """You are a code reviewer focused on correctness. Your job is to find real bugs and issues.
-
-Look specifically for:
-- Logic errors, wrong conditions, off-by-one errors
-- Unhandled None/null dereferences
-- Unhandled exceptions or missing error handling
-- Security issues (injection, auth bypass, improper validation)
-- Resource leaks (unclosed files/connections)
-- Type mismatches or wrong API usage
-- Function/type signature changes that could break callers
-- Missing error handling on new async or IO code paths
-- Coupling or abstraction violations (accessing internals, bypassing interface layers)
-
-If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
-
-Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
-(1) What semantically changed (2) Which call sites or error paths may be affected.
-Then output the JSON array after the reasoning block.
-
-Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
-{
-  "line": <integer — must be a line number marked [L<n>] in the diff below>,
-  "severity": "bug" | "security" | "warning" | "suggestion" | "informational",
-  "title": "<10 words max>",
-  "body": "<description of the issue>",
-  "fix": "<optional: corrected code only, no diff markers>",
-  "confidence": <integer 1-10, your certainty this is a real issue>
-}
-
-Rules:
-- "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
-- Only report issues on changed lines (marked with +).
-- Omit "fix" if no clean fix is obvious.
-- "confidence" 8-10 = definite issue; 5-6 = possible but unverified → use "informational"; 1-4 = speculative, omit.
-- Use "informational" for findings sourced from tool output (Semgrep, linter) that you cannot independently verify from reading the changed code.
-- Use "informational" for technically correct code that is unrelated to the PR's stated intent (title/description). Do not elevate pre-existing issues to "warning" or above unless the PR directly touches the affected logic.
-- Findings with confidence 5–6 that you cannot confirm from the code alone must be "informational", not "warning" or above.
-- Return [] if there is nothing significant to report.
-"""
-
-SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(
@@ -164,17 +123,60 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
     return "\n".join(lines_out)
 
 
-async def _call_llm(system: str, user_content: str) -> str:
-    """Call configured LLM provider via LiteLLM; return assistant message content or empty string."""
-    response = await acompletion(
-        model=config.LLM_MODEL,
-        messages=[
+async def _call_llm(
+    system: str,
+    user_content: str,
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+    temperature: float = 0.0,
+) -> str:
+    """Call configured LLM provider; return assistant message content or empty string."""
+    resolved_base = api_base or config.LLM_API_BASE or None
+    resolved_model = model or config.LLM_MODEL
+    resolved_key = api_key or config.LLM_API_KEY or None
+
+    # When both a custom base and key are provided, call the OpenAI-compatible endpoint
+    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth.
+    if resolved_key and resolved_base:
+        import asyncio as _asyncio
+        raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
+        base = resolved_base.rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        url = f"{base}/chat/completions"
+        payload = {
+            "model": raw_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": temperature,
+        }
+        headers = {"Authorization": f"Bearer {resolved_key}"}
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.debug("429 rate-limit, retrying in %ss", wait)
+                await _asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return (resp.json()["choices"][0]["message"]["content"] or "").strip()
+        resp.raise_for_status()  # final attempt exhausted
+
+    kwargs: Dict[str, Any] = {
+        "model": resolved_model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ],
-        api_base=config.LLM_API_BASE or None,
-        timeout=120.0,
-    )
+        "api_base": resolved_base,
+        "timeout": 120.0,
+        "temperature": temperature,
+    }
+    response = await acompletion(**kwargs)
     return (response.choices[0].message.content or "").strip()
 
 
@@ -184,6 +186,19 @@ _LINE_REF_RE = re.compile(
     r"(?:^|\n)\s*(?:(?:Line|line|L)\s*|#\s*|(?:at|on)\s+line\s+)(\d+)\s*[:\.\-]?\s*",
     re.IGNORECASE,
 )
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove <thinking>…</thinking> and <reasoning>…</reasoning> blocks.
+
+    Thinking/reasoning models (DeepSeek, Qwen3, o-series) emit these before
+    their actual output. They confuse JSON parsers because the prose often
+    contains '[', '{', ']', '}' characters.
+    """
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
 
 
 def _strip_diff_markers_from_code_block(content: str) -> str:
@@ -273,7 +288,14 @@ def _format_structured_comment_body(item: Dict[str, Any]) -> str:
     badge = _SEV_BADGE_BY_KEY.get(severity, _SEV_BADGE_BY_KEY["suggestion"])
     title = (item.get("title") or "").strip() or "Issue"
     body_text = (item.get("body") or "").strip()
-    fix = (item.get("fix") or "").strip()
+    _fix_raw = item.get("fix") or ""
+    if isinstance(_fix_raw, dict):
+        # Model returned {"before": "...", "after": "..."} or similar — render as before/after
+        before = (_fix_raw.get("before") or "").strip()
+        after = (_fix_raw.get("after") or _fix_raw.get("after_fix") or "").strip()
+        fix = f"Before:\n{before}\n\nAfter:\n{after}" if before or after else str(_fix_raw)
+    else:
+        fix = str(_fix_raw).strip()
     parts = [f"{badge} {title}"]
     if body_text:
         parts.append("\n\n" + body_text)
@@ -283,16 +305,13 @@ def _format_structured_comment_body(item: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _extract_json_array(raw: str) -> Optional[List[Any]]:
-    """Extract a JSON array from raw LLM output (may be wrapped in prose or markdown)."""
-    text = raw.strip()
-    # Find first '[' and last ']' to get the array slice
-    start = text.find("[")
-    if start < 0:
-        return None
+def _balanced_array_end(text: str, start: int) -> int:
+    """Return the index just past the ']' that closes the '[' at `start`, or -1.
+
+    String-aware: brackets inside quoted strings don't affect nesting depth.
+    """
     depth = 0
-    end = -1
-    in_string = None
+    in_string: Optional[str] = None
     i = start
     while i < len(text):
         c = text[i]
@@ -306,26 +325,44 @@ def _extract_json_array(raw: str) -> Optional[List[Any]]:
             continue
         if c in ('"', "'"):
             in_string = c
-            i += 1
-            continue
-        if c == "[":
+        elif c == "[":
             depth += 1
-            i += 1
-            continue
-        if c == "]":
+        elif c == "]":
             depth -= 1
             if depth == 0:
-                end = i + 1
-                break
-            i += 1
-            continue
+                return i + 1
         i += 1
-    if end < 0:
-        return None
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError:
-        return None
+    return -1
+
+
+def _extract_json_array(raw: str) -> Optional[List[Any]]:
+    """Extract a JSON array from raw LLM output.
+
+    Robust against reasoning models: first strips <think>/<thinking>/<reasoning>
+    blocks, then tries each '[' as a candidate start and returns the first
+    balanced slice that parses as a JSON *list*. This survives prose that
+    contains stray brackets (e.g. "[L10]" line references), markdown fences, and
+    leading commentary before the real array.
+
+    Returns None when no list can be extracted. Callers should WARNING-log when
+    the raw input was non-empty but this returns None — that signals a parse
+    failure (output received but unusable), not a genuinely empty result.
+    """
+    text = _strip_thinking_blocks(raw)
+    search_from = 0
+    while True:
+        start = text.find("[", search_from)
+        if start < 0:
+            return None
+        end = _balanced_array_end(text, start)
+        if end > 0:
+            try:
+                parsed = json.loads(text[start:end])
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return parsed
+        search_from = start + 1
 
 
 def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
@@ -379,10 +416,44 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
             return out
         logger.debug("JSON array empty or invalid items for %s", path)
 
-    # Fallback: freeform "Line N:" parsing
+    # Fallback 1: tab-separated format "[L<n>]\t<severity>\t<title>\t<body>"
+    # Some models (e.g. qwen3-coder-next) emit this instead of JSON.
+    _TAB_LINE_RE = re.compile(r"^\[L(\d+)\]\t(.+)$", re.MULTILINE)
+    tab_matches = _TAB_LINE_RE.findall(text)
+    if tab_matches:
+        out = []
+        for line_str, rest in tab_matches:
+            try:
+                line_int = int(line_str)
+            except ValueError:
+                continue
+            parts = rest.split("\t", 2)
+            severity = parts[0].strip() if len(parts) > 0 else "warning"
+            title    = parts[1].strip() if len(parts) > 1 else rest.strip()
+            body_txt = parts[2].strip() if len(parts) > 2 else ""
+            body = _format_structured_comment_body({
+                "severity": severity,
+                "title": title,
+                "body": body_txt or title,
+            })
+            if body.strip():
+                out.append({"line": line_int, "body": body, "post_inline": True})
+                logger.debug("LLM tab-format finding: file=%s line=%s sev=%s title=%r", path, line_int, severity, title)
+        if out:
+            return out
+
+    # Fallback 2: freeform "Line N:" parsing
     matches = list(_LINE_REF_RE.finditer(text))
     if not matches:
-        logger.debug("No line references found in review for %s", path)
+        # Non-empty model output that yielded no findings via ANY parser is a
+        # parse failure, not a genuine empty result. Log loudly with a snippet
+        # so silent zero-finding reviews are visible in the server log.
+        logger.warning(
+            "Review parse FAILURE for %s: received %d chars of model output but "
+            "extracted no findings (no JSON array, tab-format, or line refs). "
+            "Raw head: %r",
+            path, len(raw), raw.strip()[:300],
+        )
         return []
     out = []
     for i, m in enumerate(matches):
@@ -407,10 +478,23 @@ def _format_file_context(file_context: Dict[str, Any]) -> str:
     path = file_context.get("path") or "?"
     content = (file_context.get("content") or "").strip()
     ranges = file_context.get("ranges") or []
-    if not content or not ranges:
+    if not content:
         return ""
     lines = content.splitlines()
-    out_lines: List[str] = [
+    # When the file is small enough, render it in full so the model can verify
+    # cross-references (e.g. whether an import is used elsewhere) instead of
+    # guessing from excerpts. Above the cap, fall back to the changed ranges only.
+    if len(lines) <= config.SIFT_FULL_FILE_RENDER_MAX_LINES:
+        out_lines: List[str] = [
+            "Full file (read-only, for understanding the change):",
+            f"File: {path}",
+        ]
+        for i, line in enumerate(lines):
+            out_lines.append(f"  {i + 1:4d} | {line}")
+        return "\n".join(out_lines).strip()
+    if not ranges:
+        return ""
+    out_lines = [
         "Surrounding context (read-only, for understanding the change):",
         f"File: {path}",
     ]
@@ -625,6 +709,20 @@ async def review_file(
         if cc_block:
             user_parts.append(cc_block)
 
+    semantic_ba = (pr_context or {}).get("semantic_before_after")
+    if semantic_ba and str(semantic_ba).strip():
+        user_parts.append(
+            "Semantic before/after of changed functions in this file:\n"
+            + str(semantic_ba).strip()
+        )
+
+    callee_sigs = (pr_context or {}).get("callee_signatures")
+    if callee_sigs and str(callee_sigs).strip():
+        user_parts.append(
+            "Callee definitions from other files in this PR:\n"
+            + str(callee_sigs).strip()
+        )
+
     diff_intro = (
         f"File: {path}\n\n"
         "Diff (legend: '-' = old/removed, '+' = new/added). Each added line is annotated with [L<n>] — use that integer as \"line\" in your JSON."
@@ -816,41 +914,7 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
 async def summarize_review(comments: List[Dict[str, Any]]) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
-    comments: list of {path, line, body} (or at least body for each).
-    When >= 3 issues, prepends an LLM synthesis of cross-file patterns.
+    Cross-file insights are produced by the holistic pipeline pass (Phase 3) as inline
+    findings; this function only builds the structured summary table.
     """
-    structured = _build_structured_summary(comments)
-    if len(comments) < 3:
-        return structured
-    issue_lines = []
-    for c in comments:
-        path = c.get("path", "?")
-        line = c.get("line", "?")
-        body = (c.get("body") or "").strip()
-        if len(body) > 200:
-            body = body[:197] + "..."
-        issue_lines.append(f"- [{path}:{line}] {body}")
-    try:
-        raw = await _call_llm(SUMMARIZE_SYSTEM, "\n".join(issue_lines))
-        if raw and raw.strip():
-            synthesis = f"### Cross-file patterns\n\n{raw.strip()}\n\n---\n\n"
-            return synthesis + structured
-    except Exception as e:
-        logger.warning("LLM cross-file synthesis failed: %s", e)
-    return structured
-
-
-async def review(diff: str, pr_context: Optional[Dict[str, Any]] = None) -> str:
-    """Call Ollama to generate a code review for the given diff.
-
-    pr_context may contain "title" and "body" for the PR description.
-    Returns the model's review text. Kept for backward compatibility / fallback.
-    """
-    user_content = diff
-    if pr_context:
-        title = pr_context.get("title") or ""
-        body = pr_context.get("body") or ""
-        if title or body:
-            user_content = f"PR title: {title}\n\nPR description:\n{body}\n\n---\n\nDiff:\n{diff}"
-    raw = await _call_llm(SYSTEM_PROMPT, user_content)
-    return raw if raw else "Review could not be generated."
+    return _build_structured_summary(comments)

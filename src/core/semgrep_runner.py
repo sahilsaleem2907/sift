@@ -7,9 +7,28 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from src.intelligence.ast.language_registry import detect_language_key
+
 logger = logging.getLogger(__name__)
 
 SEMGREP_TIMEOUT = 120
+
+# Languages whose source semgrep parses reliably. A semgrep "parse error" on one
+# of these is trustworthy (the developer likely introduced broken syntax). For any
+# other file type — GitHub Actions workflow YAML, templated files, shell (semgrep's
+# bash parser is weak and chokes on ${{ }} interpolation), or unknown extensions —
+# a parse error means semgrep simply could not handle the input, NOT a code bug, so
+# we must not surface it as a finding. See _semgrep_handles_language.
+_SEMGREP_RELIABLE_LANG_KEYS = frozenset({
+    "python", "javascript", "typescript", "tsx", "go", "java",
+    "ruby", "php", "c", "cpp", "c_sharp", "rust", "kotlin", "scala",
+})
+
+
+def _semgrep_handles_language(path: str) -> bool:
+    """True if semgrep parses this file's language reliably enough that a parse
+    error is meaningful. False for workflow/templated/shell/unknown files."""
+    return detect_language_key(path) in _SEMGREP_RELIABLE_LANG_KEYS
 
 # Server-side path signals
 _SERVER_PATH_RE = re.compile(
@@ -143,6 +162,18 @@ def _parse_semgrep_output(
         parsed = _parse_error(err, root)
         if parsed:
             path_str, finding = parsed
+            # A semgrep parse error only means something on languages semgrep parses
+            # reliably. On workflow YAML, templated files, shell, or unknown types it
+            # just means "semgrep couldn't handle this input" — not a code bug — so we
+            # drop it instead of surfacing a false (and critic-exempt) "bug" comment.
+            if not _semgrep_handles_language(path_str):
+                logger.debug(
+                    "Semgrep parse error dropped (unsupported language): %s:%s — %s",
+                    path_str,
+                    finding.get("line"),
+                    (finding.get("message") or "")[:80],
+                )
+                continue
             by_path.setdefault(path_str, []).append(finding)
             logger.debug(
                 "Semgrep error (syntax/parse) added as finding: %s:%s — %s",
@@ -196,7 +227,9 @@ def run_semgrep(
     """Run Semgrep on the given path->content map. Returns path -> list of findings.
 
     Each finding has: line, message, severity, check_id, start, end, extra (full scope).
-    Syntax/parsing errors from Semgrep's errors array are included as ERROR findings.
+    Syntax/parsing errors from Semgrep's errors array are included as ERROR findings,
+    but only for languages semgrep parses reliably (see _semgrep_handles_language);
+    parse errors on workflow YAML, templated, shell, or unknown files are dropped.
     If Semgrep is not available or fails, returns {} so the review can proceed without Semgrep context.
 
     extra_configs: additional Semgrep registry packs (e.g. p/express, p/nodejs).

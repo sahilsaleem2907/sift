@@ -1,0 +1,15 @@
+{
+  "id": "004_resource_leak",
+  "description": "File opened without context manager or close",
+  "path": "app/io.py",
+  "diff_file": "case_004_resource_leak.py.diff",
+  "expected": [
+    {
+      "line_range": [2, 3],
+      "category": "correctness",
+      "min_impact": "medium",
+      "note": "Unclosed file handle"
+    }
+  ],
+  "false_positives": []
+}

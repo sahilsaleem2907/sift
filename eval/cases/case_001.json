@@ -1,0 +1,15 @@
+{
+  "id": "001_null_deref",
+  "description": "Function returns None and caller dereferences without check",
+  "path": "app/user.py",
+  "diff_file": "case_001_null_deref.py.diff",
+  "expected": [
+    {
+      "line_range": [11, 13],
+      "category": "correctness",
+      "min_impact": "high",
+      "note": "None dereference on return value of get_user()"
+    }
+  ],
+  "false_positives": []
+}

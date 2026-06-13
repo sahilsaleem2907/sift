@@ -1,0 +1,17 @@
+diff --git a/app/api.py b/app/api.py
+--- a/app/api.py
++++ b/app/api.py
+@@ -1,3 +1,4 @@
++from app.processor import process
++
+ def handle(data):
+-    pass
++    result = process(data)
++    return result.upper()
+diff --git a/app/processor.py b/app/processor.py
+--- a/app/processor.py
++++ b/app/processor.py
+@@ -1,3 +1,3 @@
+ def process(data):
+-    return data
++    return None

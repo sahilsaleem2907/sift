@@ -1,0 +1,10 @@
+diff --git a/app/user.py b/app/user.py
+--- a/app/user.py
++++ b/app/user.py
+@@ -8,6 +8,10 @@ def get_user(user_id: int):
+     return None
+
++def process_request(user_id: int):
++    user = get_user(user_id)
++    print(user.name)
++    return user.email

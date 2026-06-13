@@ -1,0 +1,15 @@
+{
+  "id": "010_off_diff_helper",
+  "description": "Caller uses process() but bug is inside process() in another PR file",
+  "path": "app/processor.py",
+  "diff_file": "case_010_off_diff_helper.diff",
+  "expected": [
+    {
+      "line_range": [2, 4],
+      "categories": ["correctness"],
+      "min_impact": "high",
+      "note": "process() returns None without check; visible when reading callee body"
+    }
+  ],
+  "false_positives": []
+}

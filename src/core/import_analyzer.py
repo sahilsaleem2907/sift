@@ -48,18 +48,28 @@ def _decode_text(node) -> str:
 
 
 def _extract_module_from_python_node(node) -> Optional[str]:
-    """Best-effort module path from import_statement / import_from_statement."""
-    parts: List[str] = []
+    """Best-effort module path from import_statement / import_from_statement.
+
+    For `from X import a, b` the grammar exposes the module via the "module_name"
+    field; using it avoids concatenating the imported symbol names onto the module
+    (e.g. "app.auth" + "verify_token" -> "app.authverify_token").
+    """
+    module_field = node.child_by_field_name("module_name")
+    if module_field is not None:
+        text = _decode_text(module_field).strip()
+        if text:
+            return text
+
+    # import_statement (`import app.auth[, ...]`) or fallback: take the first
+    # module-like child rather than joining all of them.
     for child in node.children:
         if child.type in _PYTHON_MODULE_CHILD_TYPES:
             text = _decode_text(child).strip()
             if text:
-                parts.append(text)
+                return text
         elif child.type == "wildcard_import":
-            parts.append("*")
-    if not parts:
-        return None
-    return "".join(parts)
+            return "*"
+    return None
 
 
 def _extract_module_from_ts_node(node) -> Optional[str]:
@@ -146,18 +156,25 @@ def _import_matches_path(import_str: str, target_path: str, target_stems: Set[st
     target_no_ext = str(Path(target_norm).with_suffix(""))
     target_stem = Path(target_path).stem.lower()
 
-    if imp_norm == target_no_ext or imp_norm.endswith("/" + target_stem):
-        return True
-    if imp_norm.endswith(target_stem) and (
-        imp_norm == target_stem or imp_norm.endswith("/" + target_stem)
-    ):
-        return True
+    # Python dotted module paths ("app.auth") use dots as separators; convert to a
+    # slash form ("app/auth") so they can match file paths. Only when there's no
+    # slash already (pure dotted module, not a relative TS/JS import like "./foo").
+    imp_forms = [imp_norm]
+    if "/" not in imp_norm and "." in imp_norm:
+        imp_forms.append(imp_norm.replace(".", "/"))
 
-    imp_base = imp_norm.split("/")[-1] if "/" in imp_norm else imp_norm
-    if imp_base in target_stems:
-        return True
-    if imp_base == target_stem:
-        return True
+    for form in imp_forms:
+        if form == target_no_ext or form.endswith("/" + target_stem):
+            return True
+        if form.endswith(target_stem) and (
+            form == target_stem or form.endswith("/" + target_stem)
+        ):
+            return True
+        form_base = form.split("/")[-1] if "/" in form else form
+        if form_base in target_stems:
+            return True
+        if form_base == target_stem:
+            return True
 
     return False
 

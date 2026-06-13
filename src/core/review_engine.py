@@ -11,6 +11,7 @@ from src.integrations.github_client import GitHubClient, get_installation_token
 from src.core.pr_analyzer import get_diff_for_review, get_diff_line_numbers, split_diff_by_file
 from src.core.linter_runner import run_linters, _detect_linter
 from src.core.semgrep_runner import is_server_side_file, run_semgrep
+from src.core.secret_scan import scan_diff_for_secrets
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.analysis_routing import (
@@ -25,7 +26,16 @@ from src.core.block_policy import evaluate_block_policy
 from src.core.import_analyzer import resolve_pr_import_graph
 from src.intelligence.ast.function_extract import extract_modified_functions
 from src.feedback.preferences import format_labeled_comment_examples
-from src.intelligence.llm_client import review_file, summarize_review
+from src.intelligence.effort import current_plan
+from src.intelligence.capability import primary_capability
+from src.intelligence.llm_client import summarize_review
+from src.intelligence.passes.pipeline import (
+    FileReviewInput,
+    PRMeta,
+    run_pipeline_holistic,
+    run_pipeline_per_file,
+)
+from src.intelligence.schema import Finding
 from src.storage.database import (
     get_avg_quality_score_for_path_pattern,
     get_repo_feedback_comment_examples,
@@ -589,6 +599,15 @@ async def run_review(
                         continue
                     diff_to_paths[_diff_content_key(file_diff)].append((path, file_diff))
 
+                _effort_plan = current_plan()
+                _model_cap = primary_capability()
+                logger.debug(
+                    "[pipeline] effort=%s ctx_window=%d fn_calling=%s",
+                    _effort_plan.level,
+                    _model_cap.context_window,
+                    _model_cap.supports_function_calling,
+                )
+
                 _vector_upsert_queue: List[Tuple[list, list]] = []
                 if config.VECTOR_DB_ENABLED:
                     logger.debug(
@@ -613,9 +632,17 @@ async def run_review(
                     file_chunks, path_to_content, mod_funcs_by_path
                 )
 
+                pr_meta_for_files = PRMeta(
+                    title=(pr_context or {}).get("title") or "",
+                    body=(pr_context or {}).get("body") or "",
+                    import_graph=pr_import_graph,
+                    mod_funcs_by_path=mod_funcs_by_path,
+                    path_to_content=path_to_content,
+                )
+
                 _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)
 
-                async def _process_file(path_diff_list: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+                async def _process_file(path_diff_list: List[Tuple[str, str]]) -> List[Finding]:
                     path0, file_diff = path_diff_list[0]
 
                     # Skip docs/assets when smart routing is enabled
@@ -742,6 +769,18 @@ async def run_review(
 
                     caller_context = pr_import_graph.get(path0)
 
+                    # Augment semgrep findings with built-in regex secret scan.
+                    # Fires regardless of whether Semgrep is installed or which
+                    # ruleset it uses — findings are semgrep-shaped so they flow
+                    # through promote_static_findings as CRITICAL + critic_exempt.
+                    builtin_secret_findings = scan_diff_for_secrets(file_diff)
+                    if builtin_secret_findings:
+                        logger.debug(
+                            "[secret_scan] %s: %d built-in secret finding(s)",
+                            path0, len(builtin_secret_findings),
+                        )
+                    semgrep_for_llm = semgrep_for_llm + builtin_secret_findings
+
                     file_pr_context = {
                         **(pr_context or {}),
                         "semgrep_findings": semgrep_for_llm,
@@ -811,29 +850,30 @@ async def run_review(
                         except Exception as e:
                             logger.warning("Vector similarity failed for %s: %s", path0, e)
 
-                    file_comments: List[Dict[str, Any]] = []
+                    file_input = FileReviewInput(
+                        path=path0,
+                        file_diff=file_diff,
+                        pr_context=file_pr_context,
+                    )
                     async with _review_sem:
                         try:
-                            comments = await review_file(file_diff, path0, file_pr_context)
-                            for c in comments:
-                                for path, _ in path_diff_list:
-                                    file_comments.append(
-                                        {
-                                            "path": path,
-                                            "line": c["line"],
-                                            "body": c["body"],
-                                            "post_inline": c.get("post_inline", True),
-                                        }
-                                    )
+                            return await run_pipeline_per_file(
+                                file_input,
+                                (pr_context or {}).get("title") or "",
+                                _effort_plan,
+                                _model_cap,
+                                pr_meta_for_files,
+                            )
                         except Exception as e:
                             logger.warning("review_file failed for %s: %s", path0, e)
-                        if config.SIFT_LLM_REQUEST_DELAY > 0:
-                            await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
-                    return file_comments
+                            return []
+                        finally:
+                            if config.SIFT_LLM_REQUEST_DELAY > 0:
+                                await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
 
                 path_diff_lists = list(diff_to_paths.values())
 
-                async def _staggered_process_file(path_diff_list: List[Tuple[str, str]], idx: int) -> List[Dict[str, Any]]:
+                async def _staggered_process_file(path_diff_list: List[Tuple[str, str]], idx: int) -> List[Finding]:
                     if idx > 0:
                         await asyncio.sleep(idx * _LLM_TASK_STAGGER)
                     return await _process_file(path_diff_list)
@@ -848,12 +888,37 @@ async def run_review(
                     return_exceptions=True,
                 )
 
-                collected: List[Dict[str, Any]] = []
+                all_findings: List[Finding] = []
                 for result in results:
                     if isinstance(result, BaseException):
                         logger.warning("File review task failed: %s", result)
                     else:
-                        collected.extend(result)
+                        all_findings.extend(result)
+
+                pr_meta_full = PRMeta(
+                    title=(pr_context or {}).get("title") or "",
+                    body=(pr_context or {}).get("body") or "",
+                    import_graph=pr_import_graph,
+                    mod_funcs_by_path=mod_funcs_by_path,
+                    raw_diffs={p: fd for p, fd in file_chunks if fd.strip()},
+                    path_to_content=path_to_content,
+                )
+                try:
+                    all_findings = await run_pipeline_holistic(
+                        all_findings, pr_meta_full, _effort_plan, _model_cap
+                    )
+                except Exception as e:
+                    logger.warning("Holistic pipeline stage failed: %s", e)
+
+                collected: List[Dict[str, Any]] = [
+                    {
+                        "path": f.path,
+                        "line": f.line,
+                        "body": f.body,
+                        "post_inline": f.post_inline,
+                    }
+                    for f in all_findings
+                ]
 
                 if config.VECTOR_DB_ENABLED and _vector_upsert_queue:
                     try:
@@ -916,6 +981,8 @@ async def run_review(
                         summary,
                         comment_id=summary_comment_id,
                         paths=[p for p, _ in file_chunks],
+                        candidate_model=config.LLM_MODEL,
+                        critic_model=config.SIFT_REVIEW_MODEL or config.LLM_MODEL,
                     )
                 except Exception as e:
                     logger.warning("Failed to store review in DB: %s", e)
