@@ -51,9 +51,9 @@ on:
       SIFT_GITHUB_TOKEN:
         required: false
         description: "GitHub PAT for API when auth_mode is github_token and not using GITHUB_TOKEN secret passthrough"
-      SWIFT_API_BACKEND_BASE_URL:
+      SIFT_API_BACKEND_BASE_URL:
         required: false
-        description: "Optional override for SWIFT_API_BACKEND_BASE_URL (image default is used when omitted)"
+        description: "Optional override for SIFT_API_BACKEND_BASE_URL (image default is used when omitted)"
       SIFT_EMBEDDING_MODEL:
         required: false
         description: "Embedding model string (e.g. ollama/nomic-embed-text)"
@@ -89,7 +89,7 @@ jobs:
           SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
           SIFT_LLM_API_BASE: ${{ secrets.SIFT_LLM_API_BASE }}
           SIFT_GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
-          SWIFT_API_BACKEND_BASE_URL: ${{ secrets.SWIFT_API_BACKEND_BASE_URL }}
+          SIFT_API_BACKEND_BASE_URL: ${{ secrets.SIFT_API_BACKEND_BASE_URL }}
           SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
           SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
           SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
@@ -115,7 +115,7 @@ jobs:
           echo "SIFT_CODEQL_ENABLED=${SIFT_CODEQL_ENABLED:-0}"
           echo "SIFT_VECTOR_DB_ENABLED=${SIFT_VECTOR_DB_ENABLED:-0}"
           echo "SIFT_SMART_ROUTING_ENABLED=${SIFT_SMART_ROUTING_ENABLED:-1}"
-          echo "SWIFT_API_BACKEND_BASE_URL set: $([ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ] && echo yes || echo no)"
+          echo "SIFT_API_BACKEND_BASE_URL set: $([ -n "${SIFT_API_BACKEND_BASE_URL:-}" ] && echo yes || echo no)"
           echo "::endgroup::"
           IMAGE=$(printf '%s' "$SIFT_IMAGE" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           if [ -z "$IMAGE" ]; then
@@ -125,8 +125,8 @@ jobs:
           fi
           echo "✅ Normalized image: $IMAGE"
           SWIFT_ENV_ARGS=()
-          if [ -n "${SWIFT_API_BACKEND_BASE_URL:-}" ]; then
-            SWIFT_ENV_ARGS=(-e "SWIFT_API_BACKEND_BASE_URL=$SWIFT_API_BACKEND_BASE_URL")
+          if [ -n "${SIFT_API_BACKEND_BASE_URL:-}" ]; then
+            SWIFT_ENV_ARGS=(-e "SIFT_API_BACKEND_BASE_URL=$SIFT_API_BACKEND_BASE_URL")
           fi
           echo "Starting docker pull for image: $IMAGE"
           docker pull "$IMAGE"

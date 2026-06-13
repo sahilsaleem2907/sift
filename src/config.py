@@ -12,7 +12,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Optional: bearer token to protect POST /review (GitHub Actions flow) and authenticate to token service; skip auth if unset
 SIFT_API_KEY = os.environ.get("SIFT_API_KEY") or None
-SWIFT_API_BACKEND_BASE_URL = os.environ.get("SWIFT_API_BACKEND_BASE_URL")
+SIFT_API_BACKEND_BASE_URL = os.environ.get("SIFT_API_BACKEND_BASE_URL")
 SIFT_GITHUB_TOKEN = os.environ.get("SIFT_GITHUB_TOKEN") or None
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
@@ -122,9 +122,9 @@ def validate_required() -> None:
     _log = logging.getLogger("src.config")
     if not DATABASE_URL:
         raise RuntimeError("Missing required environment variable: DATABASE_URL")
-    if not SWIFT_API_BACKEND_BASE_URL and not SIFT_GITHUB_TOKEN:
+    if not SIFT_API_BACKEND_BASE_URL and not SIFT_GITHUB_TOKEN:
         _log.warning(
-            "Neither SWIFT_API_BACKEND_BASE_URL nor SIFT_GITHUB_TOKEN is set; "
+            "Neither SIFT_API_BACKEND_BASE_URL nor SIFT_GITHUB_TOKEN is set; "
             "GitHub integration will not work for installation_id auth mode."
         )
     _valid_efforts = ("low", "balanced", "high")

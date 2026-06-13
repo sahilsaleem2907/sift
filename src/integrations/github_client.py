@@ -15,13 +15,13 @@ GITHUB_API_BASE = "https://api.github.com"
 
 async def _get_installation_token(installation_id: int) -> str:
     """Resolve a GitHub token for an installation via external token service or static fallback."""
-    if config.SWIFT_API_BACKEND_BASE_URL:
+    if config.SIFT_API_BACKEND_BASE_URL:
         headers: Dict[str, str] = {"Content-Type": "application/json"}
         if config.SIFT_API_KEY:
             headers["Authorization"] = f"Bearer {config.SIFT_API_KEY}"
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
             r = await client.post(
-                f"{config.SWIFT_API_BACKEND_BASE_URL}/api/github/installation-token",
+                f"{config.SIFT_API_BACKEND_BASE_URL}/api/github/installation-token",
                 json={"installation_id": installation_id},
                 headers=headers,
             )
@@ -34,7 +34,7 @@ async def _get_installation_token(installation_id: int) -> str:
     if config.SIFT_GITHUB_TOKEN:
         return config.SIFT_GITHUB_TOKEN
     raise RuntimeError(
-        "Cannot resolve GitHub token: set SWIFT_API_BACKEND_BASE_URL or SIFT_GITHUB_TOKEN"
+        "Cannot resolve GitHub token: set SIFT_API_BACKEND_BASE_URL or SIFT_GITHUB_TOKEN"
     )
 
 
