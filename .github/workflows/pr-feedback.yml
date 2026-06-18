@@ -5,7 +5,7 @@ on:
 
 jobs:
   feedback:
-    uses: sahilsaleem2907/sift/.github/workflows/sift-feedback.yml@master
+    uses: sahilsaleem2907/sift/.github/workflows/sift-feedback.yml@dev
     with:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}

@@ -9,7 +9,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: sahilsaleem2907/sift/.github/workflows/sift-review.yml@v1/improvements-to-review
+    uses: sahilsaleem2907/sift/.github/workflows/sift-review.yml@dev
     with:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}
