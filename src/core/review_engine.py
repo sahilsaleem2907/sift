@@ -965,14 +965,17 @@ async def run_review(
                 # GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions.
                 # Inline comments remain posted via the Reviews API (Files changed tab).
                 summary_comment_id = await github.create_comment(owner, repo, pr_number, summary)
-                _ = await github.create_pull_request_review(
-                    owner,
-                    repo,
-                    pr_number,
-                    commit_id=commit_id,
-                    body="",
-                    comments=inline_comments,
-                )
+                if inline_comments:
+                    _ = await github.create_pull_request_review(
+                        owner,
+                        repo,
+                        pr_number,
+                        commit_id=commit_id,
+                        body="",
+                        comments=inline_comments,
+                    )
+                else:
+                    logger.info("No inline findings for %s/%s PR #%s — skipping review creation", owner, repo, pr_number)
                 try:
                     store_review(
                         repo_full,
