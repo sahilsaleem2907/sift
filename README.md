@@ -24,6 +24,7 @@
 | **[Website](https://www.sift-agent.com/)** | You want a guided UI to configure Sift and related settings. |
 | **[Documentation](https://www.sift-agent.com/docs)** | You want the full reference for options, API, and operations. |
 | **This repository** | You prefer to self-host from source, build images yourself, or integrate manually. |
+| **[Architecture & flows](docs/flows.md)** | You want to understand how a review actually executes — the full lifecycle, routing, effort levels, and feedback loop. |
 
 ---
 
@@ -106,6 +107,12 @@ Details belong in your **documentation** site once you replace the placeholder l
 ## Configuration
 
 Environment variables are documented in [.env.example](.env.example) (LLM, Semgrep, CodeQL, embeddings, concurrency, and more).
+
+---
+
+## Architecture
+
+For a developer-grade map of how a review executes end to end, see the **[Flow Reference](docs/flows.md)**. It walks through one master lifecycle diagram (trigger → pipeline → output → PR block → feedback loop) plus six insets covering triggers & auth, effort plans, model-capability fallbacks, smart routing, the static-finding lifecycle, and the feedback loop. The diagrams are written in Mermaid and render natively on GitHub.
 
 ---
 
