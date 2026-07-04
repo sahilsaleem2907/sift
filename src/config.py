@@ -105,7 +105,10 @@ _review_base = (os.environ.get("SIFT_REVIEW_MODEL_BASE_URL") or "").strip()
 SIFT_REVIEW_MODEL_BASE_URL = _review_base.rstrip("/") if _review_base else None
 
 # JSON object to hard-override capability detection for unknown / self-hosted models.
+# SIFT_CAPABILITY_OVERRIDE applies to the primary model; SIFT_REVIEW_CAPABILITY_OVERRIDE to
+# the critic/holistic model. Both unset by default so detection runs (per-role, not global).
 SIFT_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_CAPABILITY_OVERRIDE") or "").strip() or None
+SIFT_REVIEW_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_REVIEW_CAPABILITY_OVERRIDE") or "").strip() or None
 
 # Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
 SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")
@@ -144,5 +147,6 @@ def setup_logging() -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 

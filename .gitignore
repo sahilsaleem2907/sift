@@ -10,3 +10,5 @@ __pycache__/
 *.pywz
 *.pyzz
 docs/plans/*
+# Benchmark runtime logs
+benchmarks-logs.txt
