@@ -4,21 +4,10 @@ from pathlib import Path
 from unittest import mock
 
 from src.core import pyright_runner
-from src.core.pyright_runner import (
-    _min_version_from_spec,
-    detect_target_python,
-    run_pyright,
-)
+from src.core.pyright_runner import detect_target_python, run_pyright
 
 
-# --- version-spec parsing (minimum of the supported range) --------------------
-
-def test_min_version_from_range():
-    assert _min_version_from_spec(">=3.11,<3.14") == "3.11"
-    assert _min_version_from_spec(">=3.9") == "3.9"
-    assert _min_version_from_spec("~=3.10") == "3.10"
-    assert _min_version_from_spec("") is None
-
+# --- target-version detection (delegates to the shared PythonVersionDetector) --
 
 def test_detect_target_python_from_requires_python(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text(

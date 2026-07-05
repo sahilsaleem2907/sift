@@ -164,11 +164,49 @@ def _critic_llm_kwargs() -> dict[str, Any]:
     }
 
 
+def _verification_context(pr_context: Optional[dict[str, Any]]) -> str:
+    """Bounded code + runtime context so the critic can verify a claim against real code.
+
+    Reuses blocks the pipeline already builds (callee bodies, changed-function before/after,
+    caller usage) plus the detected runtime target. Empty string when nothing is available —
+    the critic then keeps its safe-default behaviour.
+    """
+    if not pr_context:
+        return ""
+    parts: list[str] = []
+    rt = pr_context.get("runtime_target")
+    if rt:
+        parts.append(
+            f"Target runtime: {rt} (authoritative — an API/method/param that exists in this "
+            "version is NOT a bug)."
+        )
+    sba = pr_context.get("semantic_before_after")
+    if sba and str(sba).strip():
+        parts.append("Changed functions (before/after):\n" + str(sba).strip())
+    callee = pr_context.get("callee_signatures")
+    if callee and str(callee).strip():
+        parts.append("Callee definitions from other PR files:\n" + str(callee).strip())
+    caller = pr_context.get("caller_context")
+    if caller:
+        from src.intelligence.llm_client import _format_caller_context
+        block = _format_caller_context(caller)
+        if block:
+            parts.append(block)
+    if not parts:
+        return ""
+    return (
+        "\n\nVerification context (check the finding against this real code; "
+        "drop it ONLY if this code affirmatively disproves the claim):\n"
+        + "\n\n".join(parts)
+    )
+
+
 async def critique_batched(
     findings: list[Finding],
     diff: str,
     pr_title: str,
     cap: ModelCapability,
+    pr_context: Optional[dict[str, Any]] = None,
 ) -> list[Finding]:
     """One LLM call per file with all candidates."""
     _ = cap
@@ -188,7 +226,10 @@ async def critique_batched(
         f"     description: {_plain_body(f.body)[:400]}"
         for i, f in enumerate(to_critique)
     )
-    user_content = f"PR title: {pr_title}\n\nDiff:\n{diff}\n\nProposed findings:\n{items}"
+    user_content = (
+        f"PR title: {pr_title}\n\nDiff:\n{diff}"
+        f"{_verification_context(pr_context)}\n\nProposed findings:\n{items}"
+    )
 
     raw = await _call_llm(CRITIC_BATCHED_SYSTEM, user_content, **_critic_llm_kwargs())
     verdicts = _extract_json_array(raw) or []
@@ -275,6 +316,7 @@ async def critique_per_finding(
     diff: str,
     pr_title: str,
     cap: ModelCapability,
+    pr_context: Optional[dict[str, Any]] = None,
 ) -> list[Finding]:
     """One LLM call per finding (high effort)."""
     _ = cap
@@ -286,13 +328,14 @@ async def critique_per_finding(
     if not to_critique:
         return exempt
 
+    verify_ctx = _verification_context(pr_context)
     kept: list[Finding] = []
     llm_kw = _critic_llm_kwargs()
     for idx, f in enumerate(to_critique):
         if idx > 0 and config.SIFT_LLM_REQUEST_DELAY > 0:
             await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
         user_content = (
-            f"PR title: {pr_title}\n\nDiff:\n{diff}\n\n"
+            f"PR title: {pr_title}\n\nDiff:\n{diff}{verify_ctx}\n\n"
             f"Proposed finding:\n"
             f"line={f.line} impact={f.impact.value} certainty={f.certainty.value} "
             f"category={f.category} origin={f.origin}\n"
@@ -332,8 +375,9 @@ async def critique(
     pr_title: str,
     plan: EffortPlan,
     cap: ModelCapability,
+    pr_context: Optional[dict[str, Any]] = None,
 ) -> list[Finding]:
     """Run critic pass at the granularity defined by the effort plan."""
     if plan.critic_per_finding:
-        return await critique_per_finding(findings, diff, pr_title, cap)
-    return await critique_batched(findings, diff, pr_title, cap)
+        return await critique_per_finding(findings, diff, pr_title, cap, pr_context)
+    return await critique_batched(findings, diff, pr_title, cap, pr_context)

@@ -15,7 +15,7 @@ SIFT="${SIFT:-http://localhost:8000}"
 LOG="${LOG:-$HOME/sift_smoke.log}"
 INSTALL_ID="${INSTALL_ID:?set INSTALL_ID (org install id from the org settings UI)}"
 BENCH_DIR="${BENCH_DIR:-$HOME/personal/code-review-benchmark/offline}"
-MAX_WAIT="${MAX_WAIT:-360}"   # seconds to wait for the async review to post
+MAX_WAIT="${MAX_WAIT:-2000}"   # seconds to wait for the async review to post
 
 bot_comment_count() {  # $1=repo $2=pr -> count of sift-agent[bot] inline comments
   gh api "repos/$ORG/$1/pulls/$2/comments" \

@@ -74,6 +74,13 @@ DROP rules (a finding must meet at least one to be dropped):
    contradicted and you must DROP it.
 2. It is an exact duplicate of another finding in this list on the same line.
 3. It is about code that was NOT changed in this diff (pre-existing issue unrelated to the PR).
+4. A "Verification context" block may be provided below the diff (callee definitions, changed-function
+   bodies, caller usage). If that real code AFFIRMATIVELY disproves the claim — e.g. the finding says a
+   key/attribute/return value is absent but the shown code includes it — DROP. If the relevant code is
+   absent or inconclusive there, do NOT guess: KEEP.
+5. The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
+   includes it (the target version is authoritative). DROP — never keep "if this runs on an older
+   version" conditional findings when the target already has the API.
 
 Everything else is KEEP. In particular:
 - Uncertainty alone is NOT a reason to drop. If you are unsure, KEEP and downgrade certainty to "speculative".
@@ -104,6 +111,14 @@ DROP only if one of these is true:
    instead of dict[key], a guarded access, try/except, an `or default` fallback, or an assignment
    (LHS subscript d[k] = ... never raises KeyError) — DROP.
 2. It is about code that was NOT changed in this diff.
+3. A "Verification context" block may be provided below the diff (callee definitions, changed-function
+   bodies, caller usage). If that real code AFFIRMATIVELY disproves the claim — e.g. the finding says a
+   key/attribute/return value is absent but the shown code includes it, or a callee behaves the way the
+   finding claims it does not — DROP. If the relevant code is absent or inconclusive there, do NOT
+   guess: KEEP.
+4. The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
+   includes it (the target version is authoritative). DROP — and never keep "if this runs on an older
+   version" conditional findings when the target already has the API.
 
 Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.
 Security and correctness findings: always KEEP unless clearly wrong.

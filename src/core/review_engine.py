@@ -15,6 +15,7 @@ from src.core.secret_scan import scan_diff_for_secrets
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.pyright_runner import run_pyright
+from src.core.version_detect import CANDIDATE_FILES, detect_targets, target_for_path
 from src.core.analysis_routing import (
     FileType,
     classify_file_type,
@@ -262,6 +263,25 @@ async def run_review(
                         )
                         if yarn_content:
                             path_to_content["yarn.lock"] = yarn_content
+
+                # Detect the repo's declared target runtime version(s) once (clone-free,
+                # via the GitHub API) so the per-file LLM reviewer is grounded in the true
+                # runtime instead of hallucinating one from its prior.
+                _decl_cache: Dict[str, Optional[str]] = {}
+
+                async def _read_decl(name: str) -> None:
+                    _decl_cache[name] = (
+                        path_to_content.get(name)
+                        or await github.get_file_content(owner, repo, name, commit_id)
+                    )
+
+                await asyncio.gather(*[_read_decl(n) for n in CANDIDATE_FILES])
+                runtime_targets = detect_targets(lambda n: _decl_cache.get(n))
+                if runtime_targets:
+                    logger.debug(
+                        "[version] runtime targets: %s",
+                        {k: v.summary for k, v in runtime_targets.items()},
+                    )
 
                 _labeled_comments_text = format_labeled_comment_examples(
                     get_repo_feedback_comment_examples(repo_full)
@@ -855,6 +875,9 @@ async def run_review(
                         "semgrep_findings": semgrep_for_llm,
                         "codeql_findings": codeql_for_llm,
                         "pyright_findings": pyright_for_promote,
+                        "runtime_target": (
+                            rt.summary if (rt := target_for_path(path0, runtime_targets)) else None
+                        ),
                         "linter_issues": linter_issues_with_snippets,
                         "file_context": {
                             "path": path0,

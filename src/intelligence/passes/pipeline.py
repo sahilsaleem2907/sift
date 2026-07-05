@@ -101,7 +101,7 @@ async def run_pipeline_per_file(
                 file.path,
             )
         candidates = await critique(
-            candidates, file.file_diff, pr_title, plan, cap
+            candidates, file.file_diff, pr_title, plan, cap, enriched
         )
         logger.debug("[pipeline] %s: %d after critic", file.path, len(candidates))
 

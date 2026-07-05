@@ -19,6 +19,8 @@ import tomllib
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.core.version_detect import PythonVersionDetector
+
 logger = logging.getLogger(__name__)
 
 # Only surface the API/existence class — high precision, targets the golden class.
@@ -41,68 +43,27 @@ def _has_repo_pyright_config(repo_root: Path) -> bool:
     return False
 
 
-def _min_version_from_spec(spec: str) -> Optional[str]:
-    """Extract the minimum 'X.Y' from a requires-python spec (e.g. '>=3.11,<3.14' -> '3.11')."""
-    if not spec:
-        return None
-    m = re.search(r">=\s*(\d+)\.(\d+)", spec)
-    if m:
-        return f"{m.group(1)}.{m.group(2)}"
-    m = re.search(r"~=\s*(\d+)\.(\d+)", spec) or re.search(r"==\s*(\d+)\.(\d+)", spec)
-    if m:
-        return f"{m.group(1)}.{m.group(2)}"
-    m = re.search(r"(\d+)\.(\d+)", spec)  # last resort: first version-looking token
-    return f"{m.group(1)}.{m.group(2)}" if m else None
-
-
 def detect_target_python(repo_root: Path) -> Optional[str]:
     """Detect the repo's minimum supported Python 'X.Y', or None if undeterminable.
 
-    A version-compat bug is a bug if it breaks on any *supported* version, so we use
-    the MINIMUM of requires-python. Priority: pyproject requires-python -> setup.cfg /
-    setup.py python_requires -> [tool.mypy]/[tool.pyright] version -> .python-version.
+    Delegates to the shared PythonVersionDetector (single source of truth) using a
+    clone-backed reader. Returns just the bare 'X.Y' string that pyright's
+    --pythonversion flag expects (the detector's RuntimeTarget carries a prose summary).
     """
-    pyproject = repo_root / "pyproject.toml"
-    if pyproject.is_file():
-        try:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            proj = data.get("project")
-            if isinstance(proj, dict):
-                v = _min_version_from_spec(str(proj.get("requires-python") or ""))
-                if v:
-                    return v
-            tool = data.get("tool") if isinstance(data.get("tool"), dict) else {}
-            pr = tool.get("pyright") if isinstance(tool.get("pyright"), dict) else {}
-            if pr.get("pythonVersion"):
-                return str(pr["pythonVersion"])
-            mp = tool.get("mypy") if isinstance(tool.get("mypy"), dict) else {}
-            if mp.get("python_version"):
-                return str(mp["python_version"])
-        except Exception as e:
-            logger.debug("pyproject.toml parse failed for version detection: %s", e)
-
-    for name in ("setup.cfg", "setup.py"):
+    def _read(name: str) -> Optional[str]:
         f = repo_root / name
-        if f.is_file():
-            try:
-                text = f.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            m = re.search(r"python_requires\s*=\s*['\"]?([^'\"\n]+)", text)
-            if m:
-                v = _min_version_from_spec(m.group(1))
-                if v:
-                    return v
-
-    pv = repo_root / ".python-version"
-    if pv.is_file():
+        if not f.is_file():
+            return None
         try:
-            m = re.search(r"(\d+)\.(\d+)", pv.read_text(encoding="utf-8"))
-            if m:
-                return f"{m.group(1)}.{m.group(2)}"
+            return f.read_text(encoding="utf-8")
         except Exception:
-            pass
-    return None
+            return None
+
+    target = PythonVersionDetector().detect(_read)
+    if target is None:
+        return None
+    m = re.search(r"(\d+)\.(\d+)", target.summary)
+    return f"{m.group(1)}.{m.group(2)}" if m else None
 
 
 def _pyright_available() -> bool:

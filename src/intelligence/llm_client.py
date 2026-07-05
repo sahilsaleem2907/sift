@@ -757,6 +757,15 @@ async def review_file(
     """
     user_parts = []
     if pr_context:
+        runtime_target = pr_context.get("runtime_target")
+        if runtime_target:
+            user_parts.append(
+                f"Target runtime for this file: {runtime_target} — this is the repo's declared "
+                "target and is AUTHORITATIVE. Assume every API, method, and parameter available in "
+                "this version exists. Do NOT flag an API as missing/unavailable if it exists in this "
+                "version, and do NOT add hypothetical 'if this runs on an older version' caveats — "
+                "the target IS this version."
+            )
         file_context = pr_context.get("file_context")
         if file_context:
             fc_block = _format_file_context(file_context)
