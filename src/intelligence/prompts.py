@@ -21,6 +21,8 @@ Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
 (1) What semantically changed (2) Which call sites or error paths may be affected.
 Then output the JSON array after the reasoning block.
 
+The JSON array is REQUIRED and is the only part of your response that is used. A response that ends after the reasoning block, or contains reasoning without a following JSON array, is invalid. Always emit the array — use [] if there is nothing to report. Keep the reasoning brief so you never run out of room for the array.
+
 Respond with a JSON array only after the reasoning block. No markdown fences around the array. Each element:
 {
   "line": <integer — must be a line number marked [L<n>] in the diff below>,

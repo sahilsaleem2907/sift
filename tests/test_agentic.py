@@ -159,3 +159,66 @@ async def test_agentic_error_falls_back():
             findings = await agentic_review(file_input, plan, cap, {})
             mock_gen.assert_called_once()
             assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_agentic_error_finish_reason_retries_then_succeeds():
+    """finish_reason='error' with empty content must be retried, not treated as
+    'no findings' (the flusher.py failure in the PR #93824 benchmark run)."""
+    plan = plan_for(EffortLevel.HIGH)
+    cap = ModelCapability(128_000, 4096, True, False)
+    file_input = FileReviewInput(
+        path="app/a.py",
+        file_diff="diff --git a/app/a.py\n+++ b/app/a.py\n@@ -1 +1,2 @@\n+x\n",
+        pr_context={},
+    )
+
+    err_msg = _mock_message(content="")
+    resp_err = MagicMock()
+    resp_err.choices = [MagicMock(message=err_msg, finish_reason="error")]
+    final_msg = _mock_message(
+        content='[{"line": 1, "severity": "bug", "title": "x", "body": "y", "confidence": 9}]'
+    )
+    resp_final = MagicMock()
+    resp_final.choices = [MagicMock(message=final_msg, finish_reason="stop")]
+
+    with mock.patch("src.intelligence.passes.agentic.asyncio.sleep", new=AsyncMock()):
+        with mock.patch(
+            "src.intelligence.passes.agentic.acompletion",
+            new=AsyncMock(side_effect=[resp_err, resp_final]),
+        ) as mock_llm:
+            findings = await agentic_review(file_input, plan, cap, {})
+
+    assert mock_llm.call_count == 2          # retried past the error
+    assert len(findings) == 1
+    assert findings[0].line == 1
+
+
+@pytest.mark.asyncio
+async def test_agentic_error_finish_reason_exhausts_to_fallback():
+    """Persistent finish_reason='error' falls back to generate_candidates."""
+    plan = plan_for(EffortLevel.HIGH)
+    cap = ModelCapability(128_000, 4096, True, False)
+    file_input = FileReviewInput(
+        path="app/a.py",
+        file_diff="diff --git a/app/a.py\n+++ b/app/a.py\n@@ -1 +1,2 @@\n+x\n",
+        pr_context={},
+    )
+
+    err_msg = _mock_message(content="")
+    resp_err = MagicMock()
+    resp_err.choices = [MagicMock(message=err_msg, finish_reason="error")]
+
+    with mock.patch("src.intelligence.passes.agentic.asyncio.sleep", new=AsyncMock()):
+        with mock.patch(
+            "src.intelligence.passes.agentic.acompletion",
+            new=AsyncMock(side_effect=[resp_err, resp_err, resp_err]),
+        ):
+            with mock.patch(
+                "src.intelligence.passes.agentic.generate_candidates",
+                new=AsyncMock(return_value=[]),
+            ) as mock_gen:
+                findings = await agentic_review(file_input, plan, cap, {})
+
+    mock_gen.assert_called_once()
+    assert findings == []

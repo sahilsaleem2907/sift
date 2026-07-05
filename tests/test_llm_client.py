@@ -6,11 +6,16 @@ Regression coverage for the parser bug that shipped silently through PRs
 in that prose (e.g. "[L10]") defeated the old first-bracket-to-last-bracket
 parser, producing zero findings with no visible error.
 """
+import pytest
+
 from src.intelligence.llm_client import (
     _balanced_array_end,
+    _build_structured_summary,
     _extract_json_array,
     _parse_review_file_response,
     _strip_thinking_blocks,
+    parse_with_repair,
+    summarize_review,
 )
 
 
@@ -133,3 +138,104 @@ def test_parse_review_full_seam_pr238():
 
 def test_parse_review_genuinely_empty_returns_empty():
     assert _parse_review_file_response("<reasoning>looks fine</reasoning>\n[]", "f.ts") == []
+
+
+# ---- unclosed <reasoning> (truncated / never-emitted-array output) ----
+
+def test_strip_unclosed_reasoning_to_eof():
+    # Model wrote reasoning then stopped before the closing tag + JSON array.
+    assert _strip_thinking_blocks("<reasoning>\nfound a bug on [L5]") == ""
+
+
+def test_strip_keeps_json_before_unclosed_reasoning():
+    out = _strip_thinking_blocks('[{"line": 5}]\n<reasoning>\ntrailing junk')
+    assert '"line": 5' in out
+    assert "trailing junk" not in out
+
+
+# ---- parse_with_repair ----
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_recovers_prose_only_output():
+    """Flash's failure mode: reasoning written, JSON array never emitted."""
+    raw = "<reasoning>\nThe change on [L5] dereferences x which may be None.\n"  # unclosed, no array
+    calls = []
+
+    async def recall(prompt: str) -> str:
+        calls.append(prompt)
+        return '[{"line": 5, "severity": "bug", "title": "None deref", "body": "x may be None", "confidence": 9}]'
+
+    out = await parse_with_repair(raw, "f.py", recall)
+    assert len(out) == 1
+    assert out[0]["line"] == 5
+    assert len(calls) == 1
+    assert "JSON array" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_skips_genuine_empty():
+    """A correct [] means the model complied — do NOT waste a repair call."""
+    raw = "<reasoning>\nNothing wrong here.\n</reasoning>\n[]"
+    called = False
+
+    async def recall(prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "[]"
+
+    out = await parse_with_repair(raw, "f.py", recall)
+    assert out == []
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_no_repair_when_already_parsed():
+    raw = PR_238_RAW  # has a valid array already
+    called = False
+
+    async def recall(prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "[]"
+
+    out = await parse_with_repair(raw, "src/extension.ts", recall)
+    assert len(out) == 3
+    assert called is False
+
+
+# ---- off-diff routing into the summary ----
+
+_OFF_DIFF = [
+    {
+        "path": "src/flusher.py",
+        "line": 130,
+        "body": "![BUG](https://img.shields.io/badge/BUG-AA0000?style=for-the-badge) SpawnProcess isinstance check\n\nThe isinstance check is always false for spawned processes.",
+    }
+]
+
+
+def test_summary_renders_off_diff_section():
+    out = _build_structured_summary([], _OFF_DIFF)
+    assert "Findings not on changed lines" in out
+    assert "src/flusher.py" in out
+    assert "SpawnProcess isinstance check" in out
+    assert "found no issues" not in out
+
+
+def test_summary_off_diff_only_is_not_empty_state():
+    """Regression: off-diff-only reviews must not fall back to 'no issues'."""
+    out = _build_structured_summary([], _OFF_DIFF)
+    assert out.strip() != "Sifted through the code and found no issues."
+
+
+def test_summary_no_findings_at_all_is_empty_state():
+    assert _build_structured_summary([], []) == "Sifted through the code and found no issues."
+
+
+@pytest.mark.asyncio
+async def test_summarize_review_appends_off_diff_to_inline():
+    inline = [{"path": "a.py", "line": 3, "body": "![WARNING](https://img.shields.io/badge/WARNING-B8860B?style=for-the-badge) Something\n\nbody"}]
+    out = await summarize_review(inline, _OFF_DIFF)
+    assert "Sift Review" in out                       # main table present
+    assert "Findings not on changed lines" in out     # off-diff section appended
+    assert "SpawnProcess isinstance check" in out

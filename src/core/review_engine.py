@@ -944,18 +944,33 @@ async def run_review(
                 # One comment per (path, line); merge multiple into bullet points
                 collected = _merge_comments_by_line(collected)
 
-                collected = [
+                # GitHub inline comments must land on a '+' diff line. Findings
+                # off the diff (holistic / cross-file) can't post inline, but they
+                # are still real findings — route them into the summary comment so
+                # they remain visible (and scorable) instead of being dropped.
+                on_diff = [
                     c
                     for c in collected
                     if c["line"] in diff_lines_per_path.get(c["path"], set())
                 ]
-                all_comments = list(collected)
+                off_diff = [
+                    c
+                    for c in collected
+                    if c["line"] not in diff_lines_per_path.get(c["path"], set())
+                ]
+                for c in off_diff:
+                    logger.info(
+                        "Finding off the diff (routed to summary, not inline): %s:%s",
+                        c.get("path"),
+                        c.get("line"),
+                    )
+                all_comments = on_diff + off_diff
                 inline_comments = [
-                    c for c in collected if c.get("post_inline", True)
+                    c for c in on_diff if c.get("post_inline", True)
                 ]
                 summary = (
-                    await summarize_review(inline_comments)
-                    if inline_comments
+                    await summarize_review(inline_comments, off_diff)
+                    if (inline_comments or off_diff)
                     else "Sifted through the code and found no issues."
                 )
                 if not summary.strip():

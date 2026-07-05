@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
@@ -155,13 +155,26 @@ async def _call_llm(
         }
         headers = {"Authorization": f"Bearer {resolved_key}"}
         for attempt in range(5):
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code == 429:
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+            except httpx.RequestError as e:
+                # Connection/timeout — transient, back off and retry.
+                if attempt == 4:
+                    raise
                 wait = 2 ** attempt
-                logger.debug("429 rate-limit, retrying in %ss", wait)
+                logger.debug("LLM transport error (%s), retrying in %ss", e, wait)
                 await _asyncio.sleep(wait)
                 continue
+            # Retry on rate-limit and any 5xx (transient upstream failures).
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < 4:
+                    wait = 2 ** attempt
+                    logger.debug(
+                        "LLM %s, retrying in %ss", resp.status_code, wait
+                    )
+                    await _asyncio.sleep(wait)
+                    continue
             resp.raise_for_status()
             return (resp.json()["choices"][0]["message"]["content"] or "").strip()
         resp.raise_for_status()  # final attempt exhausted
@@ -176,8 +189,35 @@ async def _call_llm(
         "timeout": 120.0,
         "temperature": temperature,
     }
-    response = await acompletion(**kwargs)
-    return (response.choices[0].message.content or "").strip()
+    import asyncio as _asyncio
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            response = await acompletion(**kwargs)
+        except Exception as e:
+            last_exc = e
+            if attempt == 2:
+                raise
+            wait = 2 ** attempt
+            logger.debug("acompletion error (%s), retrying in %ss", e, wait)
+            await _asyncio.sleep(wait)
+            continue
+        finish = getattr(response.choices[0], "finish_reason", None)
+        content = response.choices[0].message.content or ""
+        # LiteLLM maps upstream 'error' finish_reason to 'stop'; an empty body
+        # with an error/length finish_reason is a transient upstream failure.
+        if not content.strip() and finish in ("error", "length") and attempt < 2:
+            wait = 2 ** attempt
+            logger.debug(
+                "acompletion finish_reason=%s with empty content, retrying in %ss",
+                finish, wait,
+            )
+            await _asyncio.sleep(wait)
+            continue
+        return content.strip()
+    if last_exc:
+        raise last_exc
+    return ""
 
 
 # Match line-number references so we can parse LLM output. Supports:
@@ -198,6 +238,11 @@ def _strip_thinking_blocks(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Unclosed opening tag (model wrote reasoning then stopped / was truncated
+    # before emitting the closing tag and the JSON). Strip from the tag to EOF so
+    # any JSON that *did* survive before it is still recoverable; if nothing
+    # survives, the caller sees empty and triggers the repair path.
+    text = re.sub(r"<(?:think|thinking|reasoning)>.*\Z", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
 
@@ -471,6 +516,61 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
         body = _normalize_comment_body(body)
         out.append({"line": line_int, "body": body})
     return out
+
+
+_JSON_REPAIR_INSTRUCTION = (
+    "Your previous response contained analysis but no valid JSON array, so it "
+    "could not be used. Output ONLY the JSON array of findings for the analysis "
+    "below — no reasoning, no prose, no markdown fences. If there are no real "
+    "issues, output []. Each element must have keys: line (an integer from a "
+    "[L<n>] marker in the diff), severity, title, body, optional fix, "
+    "confidence (1-10).\n\nYour previous response:\n"
+)
+
+
+async def _repair_and_parse(
+    raw: str,
+    path: str,
+    recall: Callable[[str], Awaitable[str]],
+) -> List[Dict[str, Any]]:
+    """Ask the model once to re-emit just the JSON array, then re-parse.
+
+    Used when a response had substantial content but yielded no findings via any
+    parser (a parse failure, not a genuine empty result). `recall` takes the
+    repair prompt and returns raw model output.
+    """
+    if not raw or len(raw.strip()) < 40:
+        return []
+    try:
+        repaired = await recall(_JSON_REPAIR_INSTRUCTION + raw.strip())
+    except Exception as e:
+        logger.warning("Repair call failed for %s: %s", path, e)
+        return []
+    if not repaired or not repaired.strip():
+        return []
+    findings = _parse_review_file_response(repaired, path)
+    if findings:
+        logger.info("Repair recovered %d finding(s) for %s", len(findings), path)
+    return findings
+
+
+async def parse_with_repair(
+    raw: str,
+    path: str,
+    recall: Callable[[str], Awaitable[str]],
+) -> List[Dict[str, Any]]:
+    """Parse a review response; on a genuine parse FAILURE, run one repair call.
+
+    Repair fires only when no JSON array was extractable at all (model wrote
+    prose/reasoning and never emitted the array). A correct `[]` or an array of
+    only low-confidence items counts as compliance and is left as-is.
+    """
+    findings = _parse_review_file_response(raw, path)
+    if findings or not raw or not raw.strip():
+        return findings
+    if _extract_json_array(raw) is not None:
+        return findings
+    return await _repair_and_parse(raw, path, recall)
 
 
 def _format_file_context(file_context: Dict[str, Any]) -> str:
@@ -761,7 +861,11 @@ async def review_file(
 
     raw = await _call_llm(REVIEW_FILE_SYSTEM, user_content)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
-    return _parse_review_file_response(raw, path)
+
+    async def _recall(repair_prompt: str) -> str:
+        return await _call_llm(REVIEW_FILE_SYSTEM, repair_prompt)
+
+    return await parse_with_repair(raw, path, _recall)
 
 
 def extract_comment_severity_and_title(body: str) -> tuple:
@@ -801,9 +905,48 @@ def extract_comment_severity_and_title(body: str) -> tuple:
     return ("suggestion", first)
 
 
-def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
+def _format_off_diff_section(off_diff: List[Dict[str, Any]]) -> str:
+    """Render findings that could not be posted inline (not on a changed line).
+
+    Grouped under a clear subheading so a human reads them as out-of-scope
+    context rather than line-anchored review comments. Emitted as full comment
+    bodies so downstream extractors ingest the finding text.
+    """
+    items = [c for c in off_diff if (c.get("body") or "").strip()]
+    if not items:
+        return ""
+    lines: List[str] = [
+        "",
+        "---",
+        "",
+        "### Findings not on changed lines (out of scope for inline comments)",
+        "",
+        "> These relate to code the PR did not directly change (cross-file / design), "
+        "so they can't be attached to a diff line. Listed here for visibility.",
+        "",
+    ]
+    for c in sorted(items, key=lambda x: (x.get("path") or "", x.get("line") or 0)):
+        path = c.get("path") or "?"
+        line = c.get("line") or "?"
+        body = (c.get("body") or "").strip()
+        lines.append(f"**`{path}` (near line {line})**")
+        lines.append("")
+        lines.append(body)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_structured_summary(
+    comments: List[Dict[str, Any]],
+    off_diff: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Build a structured summary with alert blocks and collapsible file details."""
+    off_diff = off_diff or []
+    off_diff_section = _format_off_diff_section(off_diff)
     if not comments:
+        # No inline findings, but off-diff findings still need to be surfaced.
+        if off_diff_section:
+            return "## Sift Review\n\n> No issues on changed lines.\n" + off_diff_section
         return "Sifted through the code and found no issues."
 
     counts: Dict[str, int] = {
@@ -908,13 +1051,19 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     lines.append("---")
     lines.append("")
     lines.append("*Inline comments with details and suggested fixes are on the Files changed tab.*")
+    if off_diff_section:
+        lines.append(off_diff_section)
     return "\n".join(lines)
 
 
-async def summarize_review(comments: List[Dict[str, Any]]) -> str:
+async def summarize_review(
+    comments: List[Dict[str, Any]],
+    off_diff: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
-    Cross-file insights are produced by the holistic pipeline pass (Phase 3) as inline
-    findings; this function only builds the structured summary table.
+    `comments` are inline (on-diff) findings rendered as a table. `off_diff`
+    findings could not be attached to a changed line (holistic / cross-file) and
+    are rendered under a dedicated out-of-scope subheading so they stay visible.
     """
-    return _build_structured_summary(comments)
+    return _build_structured_summary(comments, off_diff)

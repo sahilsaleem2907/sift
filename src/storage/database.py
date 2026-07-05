@@ -580,6 +580,9 @@ def store_tool_cache(entries: List[Dict[str, Any]]) -> None:
     if not entries:
         return
     now = datetime.now(timezone.utc)
+    # Dedupe by cache_key: Postgres ON CONFLICT DO UPDATE cannot affect the same
+    # row twice in one statement, and identical file content yields identical keys.
+    deduped = {e["cache_key"]: e for e in entries}
     with session_scope() as session:
         stmt = pg_insert(ToolResultCache).values(
             [
@@ -589,7 +592,7 @@ def store_tool_cache(entries: List[Dict[str, Any]]) -> None:
                     "findings_json": e["findings_json"],
                     "created_at": now,
                 }
-                for e in entries
+                for e in deduped.values()
             ]
         )
         stmt = stmt.on_conflict_do_update(

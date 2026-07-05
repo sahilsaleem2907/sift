@@ -1,6 +1,7 @@
 """Bounded agentic review loop with tool-calling (Phase 4, high effort)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Optional
@@ -14,7 +15,6 @@ from src.intelligence.effort import EffortPlan
 from src.intelligence.llm_client import (
     REVIEW_FILE_SYSTEM,
     _annotate_diff_with_line_numbers,
-    _parse_review_file_response,
 )
 from src.intelligence.passes.candidates import generate_candidates
 from src.intelligence.passes.pipeline import FileReviewInput
@@ -153,7 +153,37 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
         "api_base": config.LLM_API_BASE or None,
         "timeout": 120.0,
     }
-    return await acompletion(**kwargs)
+    # LiteLLM maps upstream 'error' finish_reason to 'stop' with empty content and
+    # no tool_calls; without this guard the loop silently treats that as "no
+    # findings". Log the raw response, retry with backoff, then raise so the
+    # caller falls back to a deterministic review.
+    for attempt in range(3):
+        try:
+            response = await acompletion(**kwargs)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            logger.warning(
+                "[agentic] tool call errored (%s), retry %d/2", e, attempt + 1
+            )
+            await asyncio.sleep(2 ** attempt)
+            continue
+        choice = response.choices[0]
+        finish = getattr(choice, "finish_reason", None)
+        msg = getattr(choice, "message", None)
+        content = (getattr(msg, "content", None) or "") if msg else ""
+        tool_calls = getattr(msg, "tool_calls", None) if msg else None
+        if finish == "error" or (not content.strip() and not tool_calls):
+            logger.warning(
+                "[agentic] step finish_reason=%s, empty=%s (attempt %d/3); raw head: %r",
+                finish, not content.strip(), attempt + 1, str(response)[:500],
+            )
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"agentic step failed: finish_reason={finish}")
+        return response
+    raise RuntimeError("agentic step failed: retries exhausted")
 
 
 async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
@@ -167,14 +197,23 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def _findings_from_raw(raw: str, path: str) -> list[Finding]:
+async def _findings_from_raw(raw: str, path: str) -> list[Finding]:
+    from src.intelligence.llm_client import parse_with_repair
     from src.intelligence.passes.candidates import (
         _infer_category_from_body,
         _infer_certainty_from_body,
         _infer_impact_from_body,
     )
 
-    comments = _parse_review_file_response(raw, path)
+    async def _recall(repair_prompt: str) -> str:
+        return await _call_llm_final(
+            [
+                {"role": "system", "content": REVIEW_FILE_SYSTEM},
+                {"role": "user", "content": repair_prompt},
+            ]
+        )
+
+    comments = await parse_with_repair(raw, path, _recall)
     findings: list[Finding] = []
     for c in comments:
         findings.append(
@@ -238,7 +277,7 @@ async def agentic_review(
             tool_calls = msg_dict.get("tool_calls") or []
             if not tool_calls:
                 content = msg_dict.get("content") or ""
-                return _findings_from_raw(content, path)
+                return await _findings_from_raw(content, path)
 
             for tc in tool_calls:
                 fn = tc.get("function") or {}
@@ -266,7 +305,7 @@ async def agentic_review(
             }
         )
         final = await _call_llm_final(messages)
-        return _findings_from_raw(final, path)
+        return await _findings_from_raw(final, path)
 
     except Exception as e:
         logger.warning(
