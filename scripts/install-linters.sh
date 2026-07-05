@@ -32,6 +32,10 @@ npm install -g eslint typescript stylelint markdownlint-cli
 echo "Installing oxlint..."
 npm install -g oxlint
 
+# --- pyright (type/API-existence checker; optional, gated by PYRIGHT_ENABLED) ---
+echo "Installing pyright..."
+npm install -g pyright
+
 # --- Ruby rubocop ---
 echo "Installing rubocop..."
 gem install rubocop --no-document

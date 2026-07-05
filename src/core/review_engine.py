@@ -14,6 +14,7 @@ from src.core.semgrep_runner import is_server_side_file, run_semgrep
 from src.core.secret_scan import scan_diff_for_secrets
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
+from src.core.pyright_runner import run_pyright
 from src.core.analysis_routing import (
     FileType,
     classify_file_type,
@@ -272,6 +273,7 @@ async def run_review(
                 linter_paths: Set[str] = set()
                 semgrep_paths: Set[str] = set()
                 codeql_paths: Set[str] = set()
+                pyright_paths: Set[str] = set()
 
                 if config.SIFT_SMART_ROUTING_ENABLED:
                     pr_paths = [p for p, _ in file_chunks]
@@ -322,6 +324,8 @@ async def run_review(
                             semgrep_paths.add(path)
                         if "codeql" in tools_set:
                             codeql_paths.add(path)
+                        if "pyright" in tools_set and config.PYRIGHT_ENABLED:
+                            pyright_paths.add(path)
                         tools_str = ",".join(sorted(tools_set)) if tools_set else "SKIP"
                         # Log why this risk level: which factors contributed
                         parts = [f"{k}+{v}" for k, v in breakdown.items() if v > 0]
@@ -490,6 +494,50 @@ async def run_review(
                         return {}
                     return await _run_codeql_task()
 
+                run_pyright_this_pr = config.PYRIGHT_ENABLED and len(pyright_paths) > 0
+                pyright_cache_key: Optional[str] = None
+                if run_pyright_this_pr and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                    pyright_cache_key = hashlib.sha256(
+                        (
+                            "pyright:" + repo_full + ":" + commit_id + ":"
+                            + ",".join(sorted(pyright_paths))
+                        ).encode("utf-8")
+                    ).hexdigest()
+
+                async def _pyright_or_empty() -> Dict[str, List[dict]]:
+                    if not run_pyright_this_pr:
+                        return {}
+
+                    def _run() -> Dict[str, List[dict]]:
+                        if pyright_cache_key and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                            hits = get_tool_cache_hits([pyright_cache_key], ttl_hours)
+                            cached = hits.get(pyright_cache_key)
+                            if isinstance(cached, dict):
+                                logger.debug(
+                                    "[Tool cache REUSED] Pyright: using cached results for %s (skipped run)",
+                                    repo_full,
+                                )
+                                return cached
+                        try:
+                            source_root = get_repo_at_commit(owner, repo, commit_id, token)
+                            result = run_pyright(
+                                source_root,
+                                sorted(pyright_paths),
+                                config.PYRIGHT_TIMEOUT,
+                            )
+                            if pyright_cache_key and config.TOOL_CACHE_ENABLED and result:
+                                store_tool_cache([{
+                                    "cache_key": pyright_cache_key,
+                                    "tool": "pyright",
+                                    "findings_json": json.dumps(result),
+                                }])
+                            return result
+                        except Exception as e:
+                            logger.warning("Pyright skipped: %s", e)
+                            return {}
+
+                    return await asyncio.to_thread(_run)
+
                 async def _semgrep_or_empty() -> Dict[str, List[dict]]:
                     if not run_semgrep_this_pr:
                         return {}
@@ -516,10 +564,11 @@ async def run_review(
                             )
                     return results
 
-                semgrep_result, linter_result, codeql_result = await asyncio.gather(
+                semgrep_result, linter_result, codeql_result, pyright_result = await asyncio.gather(
                     _semgrep_or_empty(),
                     asyncio.to_thread(run_linters, linter_uncached),
                     _codeql_or_empty(),
+                    _pyright_or_empty(),
                     return_exceptions=True,
                 )
 
@@ -564,6 +613,18 @@ async def run_review(
                     codeql_findings_by_path = {}
                 else:
                     codeql_findings_by_path = codeql_result
+
+                if isinstance(pyright_result, BaseException):
+                    logger.warning("Pyright failed: %s", pyright_result)
+                    pyright_findings_by_path: Dict[str, List[dict]] = {}
+                else:
+                    pyright_findings_by_path = pyright_result
+                if pyright_findings_by_path:
+                    logger.debug(
+                        "Pyright (entire repo): %d path(s), %d total finding(s)",
+                        len(pyright_findings_by_path),
+                        sum(len(v) for v in pyright_findings_by_path.values()),
+                    )
 
                 if findings_by_path:
                     total_semgrep = sum(len(v) for v in findings_by_path.values())
@@ -708,6 +769,14 @@ async def run_review(
                             if f not in codeql_on_diff and (f.get("severity") or "").upper() == "ERROR"
                         ]
                         codeql_for_llm = codeql_on_diff + codeql_critical
+
+                    # Pyright: diff-filtered only (no file-wide bypass). Promoted critic-exempt
+                    # via promote_static_findings; NOT fed to the per-file LLM context to avoid
+                    # a duplicate of the promoted finding.
+                    pyright_for_promote = [
+                        f for f in pyright_findings_by_path.get(path0, [])
+                        if f.get("line") in diff_lines
+                    ]
                     if config.SIFT_SMART_ROUTING_ENABLED:
                         logger.debug(
                             "[Smart routing] LLM context for %s: linter=%s semgrep=%s codeql=%s",
@@ -785,6 +854,7 @@ async def run_review(
                         **(pr_context or {}),
                         "semgrep_findings": semgrep_for_llm,
                         "codeql_findings": codeql_for_llm,
+                        "pyright_findings": pyright_for_promote,
                         "linter_issues": linter_issues_with_snippets,
                         "file_context": {
                             "path": path0,

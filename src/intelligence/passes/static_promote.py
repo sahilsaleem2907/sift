@@ -195,6 +195,7 @@ async def promote_static_findings(
     file_diff: str,
     semgrep_findings: list[dict],
     codeql_findings: list[dict],
+    pyright_findings: list[dict] | None = None,
 ) -> list[Finding]:
     """Convert ERROR/secret tool findings to critic_exempt Findings, enriched by LLM.
 
@@ -208,34 +209,31 @@ async def promote_static_findings(
     for f in codeql_findings:
         if should_auto_promote(f):
             to_promote.append((f, "codeql"))
+    for f in pyright_findings or []:
+        if should_auto_promote(f):
+            to_promote.append((f, "pyright"))
 
     if not to_promote:
         return []
 
     logger.info(
-        "[static_promote] path=%s: auto-promoting %d finding(s) (%s semgrep, %s codeql)",
+        "[static_promote] path=%s: auto-promoting %d finding(s) (%s semgrep, %s codeql, %s pyright)",
         path,
         len(to_promote),
         sum(1 for _, o in to_promote if o == "semgrep"),
         sum(1 for _, o in to_promote if o == "codeql"),
+        sum(1 for _, o in to_promote if o == "pyright"),
     )
 
     # Group by origin for batched enrichment calls
-    semgrep_batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == "semgrep"]
-    codeql_batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == "codeql"]
-
     enriched: dict[int, dict] = {}
-
-    if semgrep_batch:
-        raw_fs = [f for f, _ in semgrep_batch]
-        enrich_results = await _enrich_batch(raw_fs, path, "semgrep", file_diff)
-        for (_, idx), entry in zip(semgrep_batch, enrich_results):
-            enriched[idx] = entry
-
-    if codeql_batch:
-        raw_fs = [f for f, _ in codeql_batch]
-        enrich_results = await _enrich_batch(raw_fs, path, "codeql", file_diff)
-        for (_, idx), entry in zip(codeql_batch, enrich_results):
+    for origin in ("semgrep", "codeql", "pyright"):
+        batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == origin]
+        if not batch:
+            continue
+        raw_fs = [f for f, _ in batch]
+        enrich_results = await _enrich_batch(raw_fs, path, origin, file_diff)
+        for (_, idx), entry in zip(batch, enrich_results):
             enriched[idx] = entry
 
     findings = []

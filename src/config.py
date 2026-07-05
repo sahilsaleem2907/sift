@@ -40,6 +40,12 @@ CODEQL_SUITE_RAW = (os.environ.get("CODEQL_SUITE") or "default").strip().lower()
 _VALID_SUITES = ("default", "security-extended", "security-and-quality")
 CODEQL_SUITE = CODEQL_SUITE_RAW if CODEQL_SUITE_RAW in _VALID_SUITES else "default"
 CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
+
+# Pyright type-checker (optional; default disabled). Deterministic API/version-existence
+# findings, promoted critic-exempt. Runs against the full clone (like CodeQL).
+_PYRIGHT_ENABLED_RAW = (os.environ.get("PYRIGHT_ENABLED") or "0").strip().lower()
+PYRIGHT_ENABLED = _PYRIGHT_ENABLED_RAW in ("1", "true", "yes")
+PYRIGHT_TIMEOUT = int(os.environ.get("PYRIGHT_TIMEOUT") or "600")
 # Base directory for cached git clones (default: ~/.sift/clones or temp)
 _sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
 if _sift_clones:

@@ -1,6 +1,42 @@
 """Tests for static_promote._build_finding title enrichment."""
-from src.intelligence.passes.static_promote import _build_finding
+from unittest import mock
+
+import pytest
+
+from src.intelligence.passes.static_promote import (
+    _build_finding,
+    promote_static_findings,
+    should_auto_promote,
+)
 from src.intelligence.schema import Impact, Certainty
+
+
+_PYRIGHT_FINDING = {
+    "check_id": "pyright/reportAttributeAccessIssue",
+    "line": 5,
+    "severity": "ERROR",
+    "message": 'Cannot access attribute "shutdown" for class "Queue"',
+}
+
+
+def test_pyright_error_is_auto_promoted():
+    assert should_auto_promote(_PYRIGHT_FINDING) is True
+
+
+@pytest.mark.asyncio
+async def test_pyright_finding_promoted_critic_exempt():
+    async def _fake_enrich(raw, path, origin, diff):
+        return [{"body": f.get("message", ""), "fix": "", "title": ""} for f in raw]
+
+    with mock.patch("src.intelligence.passes.static_promote._enrich_batch", _fake_enrich):
+        out = await promote_static_findings(
+            "pkg/mod.py", "@@ +5 @@\n+ q.shutdown()",
+            semgrep_findings=[], codeql_findings=[], pyright_findings=[_PYRIGHT_FINDING],
+        )
+    assert len(out) == 1
+    assert out[0].origin == "pyright"
+    assert out[0].critic_exempt is True
+    assert out[0].line == 5
 
 
 _SECRET_FINDING = {

@@ -65,7 +65,10 @@ async def run_pipeline_per_file(
     from src.intelligence.passes.static_promote import promote_static_findings
     semgrep_raw = (file.pr_context or {}).get("semgrep_findings") or []
     codeql_raw = (file.pr_context or {}).get("codeql_findings") or []
-    promoted = await promote_static_findings(file.path, file.file_diff, semgrep_raw, codeql_raw)
+    pyright_raw = (file.pr_context or {}).get("pyright_findings") or []
+    promoted = await promote_static_findings(
+        file.path, file.file_diff, semgrep_raw, codeql_raw, pyright_raw
+    )
     if promoted:
         logger.info("[pipeline] %s: %d static finding(s) auto-promoted", file.path, len(promoted))
 

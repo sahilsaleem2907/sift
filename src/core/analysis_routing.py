@@ -268,17 +268,22 @@ def risk_level(score: int) -> RiskLevel:
 def get_tools_for_file(
     file_type: FileType, risk: RiskLevel, path: str = ""
 ) -> FrozenSet[str]:
-    """Return which tools to run for this file. Values: 'linter', 'semgrep', 'codeql'."""
+    """Return which tools to run for this file. Values: 'linter', 'semgrep', 'codeql', 'pyright'."""
     if file_type == FileType.DOCUMENTATION or file_type == FileType.ASSETS:
         return frozenset()
 
     if file_type == FileType.CODE:
-        if risk == RiskLevel.LOW:
-            return frozenset({"linter"})
+        # Pyright (type/API-existence) applies to Python at any risk level — API bugs
+        # aren't risk-correlated. Gated at runtime by config.PYRIGHT_ENABLED.
+        is_python = path.replace("\\", "/").lower().endswith((".py", ".pyi"))
+        tools = {"linter"}
         if risk in (RiskLevel.MEDIUM, RiskLevel.HIGH):
-            return frozenset({"linter", "semgrep"})
-        # CRITICAL
-        return frozenset({"linter", "semgrep", "codeql"})
+            tools.add("semgrep")
+        elif risk == RiskLevel.CRITICAL:
+            tools |= {"semgrep", "codeql"}
+        if is_python:
+            tools.add("pyright")
+        return frozenset(tools)
 
     if file_type == FileType.CONFIG:
         # .env (not .env.example) always gets Semgrep for secret scanning
