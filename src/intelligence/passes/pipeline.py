@@ -104,8 +104,15 @@ async def run_pipeline_per_file(
                 "[pipeline] %s: SIFT_REVIEW_MODEL not set, critic using primary model",
                 file.path,
             )
+        critic_ctx = {
+            **enriched,
+            # Carried for the symmetric critic tool loop (high effort).
+            "_repo_root": (pr_meta.repo_root if pr_meta else None),
+            "_path_to_content": path_to_content,
+            "_mod_funcs_by_path": mod_funcs_by_path,
+        }
         candidates = await critique(
-            candidates, file.file_diff, pr_title, plan, cap, enriched
+            candidates, file.file_diff, pr_title, plan, cap, critic_ctx
         )
         logger.debug("[pipeline] %s: %d after critic", file.path, len(candidates))
 

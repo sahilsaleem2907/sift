@@ -164,6 +164,82 @@ def _critic_llm_kwargs() -> dict[str, Any]:
     }
 
 
+_CRITIC_TOOL_MAX_STEPS = 3
+
+
+async def _acompletion_with_tools(messages: list[dict[str, Any]], llm_kw: dict[str, Any]) -> Any:
+    from litellm import acompletion
+    from src.intelligence.passes.agentic import TOOLS
+
+    kwargs: dict[str, Any] = {
+        "model": llm_kw["model"],
+        "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "auto",
+        "api_base": llm_kw.get("api_base"),
+        "timeout": 120.0,
+    }
+    if llm_kw.get("api_key"):
+        kwargs["api_key"] = llm_kw["api_key"]
+    return await acompletion(**kwargs)
+
+
+async def _critique_with_tools(
+    system: str,
+    user_content: str,
+    llm_kw: dict[str, Any],
+    repo_root: str,
+    path_to_content: dict[str, str],
+    mod_funcs: dict[str, Any],
+) -> str:
+    """Bounded tool-calling critic loop; returns the final raw model text.
+
+    Symmetric with the agentic generator: the critic can call the same fact-tools to
+    AFFIRMATIVELY verify a claim before dropping it (burden of proof on the drop).
+    """
+    from src.intelligence.passes.agentic import (
+        _execute_tool,
+        _message_to_dict,
+        _parse_tool_arguments,
+    )
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+    for _ in range(_CRITIC_TOOL_MAX_STEPS):
+        resp = await _acompletion_with_tools(messages, llm_kw)
+        msg = resp.choices[0].message
+        md = _message_to_dict(msg)
+        messages.append(md)
+        tool_calls = md.get("tool_calls") or []
+        if not tool_calls:
+            return md.get("content") or ""
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or ""
+            args = _parse_tool_arguments(fn.get("arguments"))
+            result = _execute_tool(name, args, path_to_content, mod_funcs, repo_root)
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.get("id") or "", "content": result}
+            )
+    # Step budget exhausted — demand a final verdict with no more tool calls.
+    from litellm import acompletion
+
+    messages.append({
+        "role": "user",
+        "content": "Step limit reached. Respond with your final JSON verdict object only (no tool calls).",
+    })
+    resp = await acompletion(
+        model=llm_kw["model"],
+        messages=messages,
+        api_base=llm_kw.get("api_base"),
+        api_key=llm_kw.get("api_key") or None,
+        timeout=120.0,
+    )
+    return resp.choices[0].message.content or ""
+
+
 def _verification_context(pr_context: Optional[dict[str, Any]]) -> str:
     """Bounded code + runtime context so the critic can verify a claim against real code.
 
@@ -329,6 +405,14 @@ async def critique_per_finding(
         return exempt
 
     verify_ctx = _verification_context(pr_context)
+    # Symmetric tools: let the critic call the same fact-tools to verify before dropping.
+    repo_root = (pr_context or {}).get("_repo_root")
+    path_to_content = (pr_context or {}).get("_path_to_content") or {}
+    mod_funcs = (pr_context or {}).get("_mod_funcs_by_path") or {}
+    use_tools = bool(repo_root) and cap.supports_function_calling
+    if use_tools:
+        logger.debug("[critic] per-finding tool loop enabled (repo_root available)")
+
     kept: list[Finding] = []
     llm_kw = _critic_llm_kwargs()
     for idx, f in enumerate(to_critique):
@@ -342,7 +426,17 @@ async def critique_per_finding(
             f"title: {f.title or _title_from_body(f.body)}\n"
             f"description: {_plain_body(f.body)[:400]}"
         )
-        raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
+        if use_tools and repo_root:
+            try:
+                raw = await _critique_with_tools(
+                    CRITIC_FINDING_SYSTEM, user_content, llm_kw,
+                    repo_root, path_to_content, mod_funcs,
+                )
+            except Exception as e:
+                logger.warning("[critic] tool loop failed (%s); plain critic fallback", e)
+                raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
+        else:
+            raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
         v = _extract_json_object(raw)
         if v is None:
             kept.append(f)

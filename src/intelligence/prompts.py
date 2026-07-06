@@ -93,6 +93,11 @@ DROP rules (a finding must meet at least one to be dropped):
    includes it (the target version is authoritative). DROP — never keep "if this runs on an older
    version" conditional findings when the target already has the API.
 
+Tool-grounded findings: if a finding's description cites a code-intelligence observation (e.g.
+"get_mro shows method X unimplemented", "get_signature has no parameter Y", "find_definition shows
+..."), treat that as verified evidence. DROP it ONLY if the diff or the verification context
+AFFIRMATIVELY contradicts it — never on reasoning or hand-wavy assertion alone.
+
 Everything else is KEEP. In particular:
 - Uncertainty alone is NOT a reason to drop. If you are unsure, KEEP and downgrade certainty to "speculative".
 - "Cannot fully confirm without more context" → KEEP with certainty="speculative".
@@ -130,6 +135,13 @@ DROP only if one of these is true:
 4. The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
    includes it (the target version is authoritative). DROP — and never keep "if this runs on an older
    version" conditional findings when the target already has the API.
+
+When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers,
+read_file, search_repo), you MUST use them to verify any claim that depends on UNCHANGED code — a
+symbol's real signature, a base class's abstract methods, a type/definition you cannot see in the
+diff — BEFORE dropping. Do not drop such a finding on reasoning alone; drop only if a tool result or
+the diff AFFIRMATIVELY contradicts it. If the finding already cites a tool observation, keep it
+unless a fresh tool call disproves it. The burden of proof is on the DROP.
 
 Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.
 Security and correctness findings: always KEEP unless clearly wrong.
