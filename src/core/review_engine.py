@@ -15,6 +15,7 @@ from src.core.secret_scan import scan_diff_for_secrets
 from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.pyright_runner import run_pyright
+from src.core.analyzers import run_analyzers
 from src.core.version_detect import CANDIDATE_FILES, detect_targets, target_for_path
 from src.core.analysis_routing import (
     FileType,
@@ -870,11 +871,23 @@ async def run_review(
                         )
                     semgrep_for_llm = semgrep_for_llm + builtin_secret_findings
 
+                    analyzer_for_promote = (
+                        run_analyzers(path0, file_content, file_diff)
+                        if config.ANALYZERS_ENABLED
+                        else []
+                    )
+                    if analyzer_for_promote:
+                        logger.debug(
+                            "[analyzer] %s: %d verdict finding(s) on changed lines",
+                            path0, len(analyzer_for_promote),
+                        )
+
                     file_pr_context = {
                         **(pr_context or {}),
                         "semgrep_findings": semgrep_for_llm,
                         "codeql_findings": codeql_for_llm,
                         "pyright_findings": pyright_for_promote,
+                        "analyzer_findings": analyzer_for_promote,
                         "runtime_target": (
                             rt.summary if (rt := target_for_path(path0, runtime_targets)) else None
                         ),

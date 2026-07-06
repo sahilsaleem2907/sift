@@ -196,6 +196,7 @@ async def promote_static_findings(
     semgrep_findings: list[dict],
     codeql_findings: list[dict],
     pyright_findings: list[dict] | None = None,
+    analyzer_findings: list[dict] | None = None,
 ) -> list[Finding]:
     """Convert ERROR/secret tool findings to critic_exempt Findings, enriched by LLM.
 
@@ -212,22 +213,27 @@ async def promote_static_findings(
     for f in pyright_findings or []:
         if should_auto_promote(f):
             to_promote.append((f, "pyright"))
+    for f in analyzer_findings or []:
+        if should_auto_promote(f):
+            to_promote.append((f, "analyzer"))
 
     if not to_promote:
         return []
 
     logger.info(
-        "[static_promote] path=%s: auto-promoting %d finding(s) (%s semgrep, %s codeql, %s pyright)",
+        "[static_promote] path=%s: auto-promoting %d finding(s) "
+        "(%s semgrep, %s codeql, %s pyright, %s analyzer)",
         path,
         len(to_promote),
         sum(1 for _, o in to_promote if o == "semgrep"),
         sum(1 for _, o in to_promote if o == "codeql"),
         sum(1 for _, o in to_promote if o == "pyright"),
+        sum(1 for _, o in to_promote if o == "analyzer"),
     )
 
     # Group by origin for batched enrichment calls
     enriched: dict[int, dict] = {}
-    for origin in ("semgrep", "codeql", "pyright"):
+    for origin in ("semgrep", "codeql", "pyright", "analyzer"):
         batch = [(f, i) for i, (f, o) in enumerate(to_promote) if o == origin]
         if not batch:
             continue

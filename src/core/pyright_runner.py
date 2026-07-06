@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 # Only surface the API/existence class — high precision, targets the golden class.
 # reportMissingImports & general type-strictness are intentionally excluded.
-_ALLOWED_RULES = frozenset({"reportAttributeAccessIssue", "reportCallIssue"})
+# reportAbstractUsage: instantiating a class with unimplemented abstract methods is
+# a guaranteed TypeError at runtime — high precision, so it joins the floor.
+_ALLOWED_RULES = frozenset(
+    {"reportAttributeAccessIssue", "reportCallIssue", "reportAbstractUsage"}
+)
 
 
 def _has_repo_pyright_config(repo_root: Path) -> bool:

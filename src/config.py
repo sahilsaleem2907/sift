@@ -46,6 +46,11 @@ CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
 _PYRIGHT_ENABLED_RAW = (os.environ.get("PYRIGHT_ENABLED") or "0").strip().lower()
 PYRIGHT_ENABLED = _PYRIGHT_ENABLED_RAW in ("1", "true", "yes")
 PYRIGHT_TIMEOUT = int(os.environ.get("PYRIGHT_TIMEOUT") or "600")
+
+# Deterministic AST verdict analyzers (language seam). High-precision, promoted
+# as critic-exempt findings. On by default; set ANALYZERS_ENABLED=0 to disable.
+_ANALYZERS_ENABLED_RAW = (os.environ.get("ANALYZERS_ENABLED") or "1").strip().lower()
+ANALYZERS_ENABLED = _ANALYZERS_ENABLED_RAW in ("1", "true", "yes")
 # Base directory for cached git clones (default: ~/.sift/clones or temp)
 _sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
 if _sift_clones:
