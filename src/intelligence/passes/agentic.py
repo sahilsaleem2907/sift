@@ -68,6 +68,105 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read up to 160 lines of ANY file in the repository (not just PR "
+                "files), optionally a line range. Use to inspect definitions, base "
+                "classes, or callers that live in unchanged code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository-relative file path"},
+                    "start_line": {"type": "integer", "description": "1-based start line (optional)"},
+                    "end_line": {"type": "integer", "description": "1-based end line (optional)"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_repo",
+            "description": "Regex-search the whole repository (like git grep). Returns path:line: text matches.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "A regular expression"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_definition",
+            "description": "Find where a symbol (function/class/type) is DEFINED across the repo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A bare identifier"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_callers",
+            "description": "Find call/usage sites of a symbol across the repo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A bare identifier"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_signature",
+            "description": (
+                "Return the definition/signature line(s) of a symbol. Use to verify a "
+                "method exists and which parameters/keywords it actually accepts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A bare identifier"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_mro",
+            "description": (
+                "For a class, report its base classes, each base's abstract methods, "
+                "and which abstract methods the class fails to implement (resolved "
+                "repo-wide). Use to check abstract-method completeness or isinstance "
+                "type relationships."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File containing the class"},
+                    "class_name": {"type": "string", "description": "The class name"},
+                },
+                "required": ["path", "class_name"],
+            },
+        },
+    },
 ]
 
 
@@ -76,7 +175,33 @@ def _execute_tool(
     arguments: dict[str, Any],
     path_to_content: dict[str, str],
     mod_funcs_by_path: dict[str, list[FunctionChunk]],
+    repo_root: Optional[str] = None,
 ) -> str:
+    # Repo-wide tools (backed by the git checkout). Degrade gracefully when the
+    # checkout is unavailable (e.g. eval harness with no clone).
+    if name in ("read_file", "search_repo", "find_definition", "find_callers", "get_signature", "get_mro"):
+        if not repo_root:
+            return "[repo-wide tools unavailable: no checkout for this review]"
+        from src.core import code_intel
+        if name == "read_file":
+            return code_intel.read_file(
+                repo_root, (arguments.get("path") or "").strip(),
+                arguments.get("start_line"), arguments.get("end_line"),
+            )
+        if name == "search_repo":
+            return code_intel.search_repo(repo_root, (arguments.get("pattern") or "").strip())
+        if name == "find_definition":
+            return code_intel.find_definition(repo_root, (arguments.get("symbol") or "").strip())
+        if name == "find_callers":
+            return code_intel.find_callers(repo_root, (arguments.get("symbol") or "").strip())
+        if name == "get_signature":
+            return code_intel.get_signature(repo_root, (arguments.get("symbol") or "").strip())
+        if name == "get_mro":
+            return code_intel.get_mro(
+                repo_root, (arguments.get("path") or "").strip(),
+                (arguments.get("class_name") or "").strip(),
+            )
+
     path = (arguments.get("path") or "").strip()
     if not path or path not in path_to_content:
         return "[not found in PR — only changed files in this pull request are available]"
@@ -240,6 +365,7 @@ async def agentic_review(
     path_to_content: dict[str, str],
     mod_funcs_by_path: Optional[dict[str, list[FunctionChunk]]] = None,
     retrieval_ctx: Optional[FileContext] = None,
+    repo_root: Optional[str] = None,
 ) -> list[Finding]:
     """Run a bounded tool-calling loop; fall back to generate_candidates on failure."""
     _ = plan
@@ -284,7 +410,7 @@ async def agentic_review(
                 name = fn.get("name") or ""
                 args = _parse_tool_arguments(fn.get("arguments"))
                 result = _execute_tool(
-                    name, args, path_to_content, mod_funcs_by_path
+                    name, args, path_to_content, mod_funcs_by_path, repo_root
                 )
                 messages.append(
                     {

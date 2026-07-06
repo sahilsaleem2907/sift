@@ -714,12 +714,23 @@ async def run_review(
                     file_chunks, path_to_content, mod_funcs_by_path
                 )
 
+                # Resolve the git checkout root for repo-wide fact-tools — only when the
+                # agentic tool loop will actually run (high effort + fn-calling). The
+                # clone is cached (pyright/codeql reuse it), so this is cheap when warm.
+                repo_root_for_tools: Optional[str] = None
+                if _effort_plan.enable_agentic and _model_cap.supports_function_calling:
+                    try:
+                        repo_root_for_tools = str(get_repo_at_commit(owner, repo, commit_id, token))
+                    except Exception as e:
+                        logger.debug("[fact-tools] repo checkout unavailable: %s", e)
+
                 pr_meta_for_files = PRMeta(
                     title=(pr_context or {}).get("title") or "",
                     body=(pr_context or {}).get("body") or "",
                     import_graph=pr_import_graph,
                     mod_funcs_by_path=mod_funcs_by_path,
                     path_to_content=path_to_content,
+                    repo_root=repo_root_for_tools,
                 )
 
                 _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)

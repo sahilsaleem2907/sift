@@ -32,6 +32,8 @@ class PRMeta:
     # extraction is unavailable (e.g. eval harness without full file content).
     raw_diffs: Optional[dict] = None
     path_to_content: Optional[dict] = None
+    # Filesystem path to the PR's git checkout; powers repo-wide fact-tools.
+    repo_root: Optional[str] = None
 
 
 async def run_pipeline_per_file(
@@ -83,6 +85,7 @@ async def run_pipeline_per_file(
             path_to_content,
             mod_funcs_by_path,
             retrieval_ctx,
+            repo_root=(pr_meta.repo_root if pr_meta else None),
         )
     else:
         candidates = await generate_candidates(file.file_diff, file.path, enriched)

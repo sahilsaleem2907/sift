@@ -15,6 +15,17 @@ Look specifically for:
 - Missing error handling on new async or IO code paths
 - Coupling or abstraction violations (accessing internals, bypassing interface layers)
 
+High-signal bug-class checklist — for each changed line, actively ask:
+1. API/kwarg existence: does every method/attribute and keyword argument actually EXIST on the resolved type (incl. stdlib/framework versions)? A call like `q.shutdown(immediate=False)` is a bug if that method/kwarg doesn't exist.
+2. None / missing-key deref: can this attribute or dict key be None / absent on SOME reachable path (e.g. an auth path where a member is None, or a key set only sometimes)? Accessing `.x` or `[k]` then raises.
+3. Abstract-method completeness: does a class instantiated or defined here implement ALL abstract methods of its base? A subclass with only `pass` raises TypeError at instantiation.
+4. Wrong-type operation: does an operation assume a type the value isn't (e.g. `math.floor`/`ceil` on a datetime, JSON-serializing a datetime, arithmetic on None)?
+5. Disjoint-type isinstance: is an `isinstance(x, T)` always False because x's real type can never be T (e.g. a spawn Process vs multiprocessing.Process)?
+6. Returns/uses the wrong value: does the code mutate one variable but return/pass a DIFFERENT (original/unmodified) one, or pass the outer object where a scoped/derived one was intended?
+7. Mutable default / shared state: a mutable default arg or dataclass field shared across calls/instances.
+
+When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers, read_file, search_repo), you MUST use them to CONFIRM or REFUTE any suspicion in this checklist before deciding — especially to resolve a symbol/type/base-class that is defined in UNCHANGED code you cannot see in the diff. A suspicion that a tool result CONFIRMS is a real finding: report it with high confidence. Do not talk yourself out of a tool-confirmed bug.
+
 If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
 
 Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:
