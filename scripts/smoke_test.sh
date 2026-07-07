@@ -7,6 +7,11 @@
 #   INSTALL_ID=<org installation id> BENCH_DIR=~/personal/code-review-benchmark/offline \
 #     bash scripts/smoke_test.sh
 #
+#   # Each sentry PR is its OWN fork repo (sentry__sentry__sift__PR<N>__...), so to run a
+#   # different benchmark PR you change the FORK (not the in-fork PR number, which stays 1).
+#   FORK_PR=95633 INSTALL_ID=... bash scripts/smoke_test.sh   # select fork by original PR #
+#   REPO=sentry__sentry__sift__PR95633__20260621 INSTALL_ID=... bash scripts/smoke_test.sh
+#
 # Prereqs: sift server running (started with bench_env.sh overlay), logging to $LOG.
 set -uo pipefail
 
@@ -16,16 +21,22 @@ LOG="${LOG:-$HOME/sift_smoke.log}"
 INSTALL_ID="${INSTALL_ID:?set INSTALL_ID (org install id from the org settings UI)}"
 BENCH_DIR="${BENCH_DIR:-$HOME/personal/code-review-benchmark/offline}"
 MAX_WAIT="${MAX_WAIT:-2000}"   # seconds to wait for the async review to post
+FORK_PR="${FORK_PR:-67876}"    # original sentry PR # → selects the fork repo (override per run)
+PR="${PR:-1}"                  # in-fork PR number (always 1 — the canonical code PR)
 
 bot_comment_count() {  # $1=repo $2=pr -> count of sift-agent[bot] inline comments
   gh api "repos/$ORG/$1/pulls/$2/comments" \
     -q '[.[]|select(.user.login=="sift-agent[bot]")]|length' 2>/dev/null || echo 0
 }
 
-# --- 1. pick a Sentry fork + its canonical code PR (PR#1) ----------------------
-REPO=$(gh repo list "$ORG" --limit 200 --json name -q '.[].name' | grep -i '__sentry__' | head -1)
-[ -z "$REPO" ] && { echo "ERROR: no '__sentry__' fork found in org $ORG"; exit 1; }
-PR=1   # PR#1 is the canonical code PR in every fork (PR#2+ are Dependabot noise)
+# --- 1. pick the Sentry fork (by FORK_PR, or explicit REPO) + its code PR (PR#1) ---
+if [ -z "${REPO:-}" ]; then
+  REPO=$(gh repo list "$ORG" --limit 200 --json name -q '.[].name' \
+    | grep -iE "__sentry__.*__PR${FORK_PR}__" | head -1)
+  [ -z "$REPO" ] && REPO=$(gh repo list "$ORG" --limit 200 --json name -q '.[].name' \
+    | grep -i "__PR${FORK_PR}__" | head -1)
+fi
+[ -z "$REPO" ] && { echo "ERROR: no fork matching __PR${FORK_PR}__ in org $ORG (set REPO= explicitly)"; exit 1; }
 STATE=$(gh pr view "$PR" --repo "$ORG/$REPO" --json state -q '.state' 2>/dev/null)
 [ "$STATE" = "OPEN" ] || { echo "ERROR: $ORG/$REPO PR#$PR not open (state=${STATE:-missing})"; exit 1; }
 echo "Smoke target: $ORG/$REPO PR#$PR"

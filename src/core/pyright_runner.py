@@ -79,6 +79,79 @@ def _pyright_available() -> bool:
         return False
 
 
+def _write_ephemeral_pyright_config(repo_root: Path, target: Optional[str]) -> Optional[Path]:
+    """Write a throwaway pyrightconfig.json so a src-layout repo's first-party imports resolve.
+
+    Without `src` on pyright's import path, `import <pkg>...` (living under src/) fails to resolve,
+    and pyright reports valid first-party symbols as missing (reportAttributeAccessIssue false
+    positives). Only called when the repo ships no pyright config, so we never clobber a real one.
+    Returns the written path (to be removed by the caller), or None on skip/failure.
+    """
+    path = repo_root / "pyrightconfig.json"
+    if path.exists():
+        return None  # never overwrite an existing config (incl. a stale ephemeral one)
+    cfg: dict = {"extraPaths": ["src"], "reportMissingImports": False}
+    if target:
+        cfg["pythonVersion"] = target
+    try:
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        return path
+    except OSError as e:
+        logger.debug("[pyright] could not write ephemeral config: %s", e)
+        return None
+
+
+_UNKNOWN_IMPORT_RE = re.compile(r'"([^"]+)"\s+is unknown import symbol', re.IGNORECASE)
+
+
+def _import_module_for_line(repo_root: Path, rel: str, line: int) -> Optional[str]:
+    """Read the finding's source line (and a few above) to find the `from Y import …` module."""
+    try:
+        lines = (repo_root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    if not (1 <= line <= len(lines)):
+        return None
+    # The diagnostic sits on the imported name; for multi-line imports scan a few lines up.
+    for i in range(line - 1, max(-1, line - 6), -1):
+        m = re.match(r"\s*from\s+([\w.]+)\s+import\b", lines[i])
+        if m:
+            return m.group(1)
+    return None
+
+
+def _resolve_module_file(repo_root: Path, dotted: str) -> Optional[Path]:
+    """Resolve an absolute dotted module to a file under the clone roots (repo_root, repo_root/src)."""
+    if not dotted or dotted.startswith("."):
+        return None  # relative imports need package context we don't resolve here
+    rel = dotted.replace(".", "/")
+    for root in (repo_root, repo_root / "src"):
+        for cand in (root / f"{rel}.py", root / rel / "__init__.py"):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _module_binds_symbol(module_file: Path, symbol: str) -> bool:
+    """True if `symbol` is bound at module top level (def/class/assignment/import).
+
+    Used to disprove a pyright "unknown import symbol" false positive: if the module
+    actually binds the name (commonly a re-export pyright couldn't follow because the
+    upstream third-party dep isn't installed), the finding is spurious.
+    """
+    try:
+        src = module_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    s = re.escape(symbol)
+    patterns = (
+        rf"^\s*(?:async\s+)?(?:def|class)\s+{s}\b",  # def/class symbol
+        rf"^\s*{s}\s*[:=]",                            # symbol = …  /  symbol: T = …
+        rf"^\s*(?:from\s+[\w.]+\s+)?import\b.*\b{s}\b",  # import/from-import (incl. `as {s}`)
+    )
+    return any(re.search(p, src, re.MULTILINE) for p in patterns)
+
+
 def run_pyright(
     repo_root: Path,
     changed_py_paths: List[str],
@@ -95,9 +168,20 @@ def run_pyright(
     cmd = ["pyright", "--outputjson"]
     # Respect the repo's own pyright config when present (it carries their version,
     # ignores, extraPaths/stubs). Otherwise pin the version we detect.
+    ephemeral_config: Optional[Path] = None
     if not _has_repo_pyright_config(repo_root):
         target = detect_target_python(repo_root)
-        if target:
+        if (repo_root / "src").is_dir():
+            # src-layout repo with no pyright config: inject extraPaths=[src] (and the
+            # version pin) via an ephemeral config so first-party imports resolve —
+            # otherwise valid symbols are flagged as missing (false positives).
+            ephemeral_config = _write_ephemeral_pyright_config(repo_root, target)
+        if ephemeral_config is not None:
+            logger.debug(
+                "[pyright] src-layout, no repo config; ephemeral extraPaths=[src] pythonVersion=%s",
+                target,
+            )
+        elif target:
             cmd += ["--pythonversion", target]
             logger.debug("[pyright] no repo config; pinning pythonVersion=%s", target)
     else:
@@ -105,47 +189,84 @@ def run_pyright(
     cmd += list(changed_py_paths)
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(repo_root),
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("pyright timed out after %ss", timeout)
-        return {}
-    except Exception as e:
-        logger.warning("pyright failed to run: %s", e)
-        return {}
-
-    # pyright exits non-zero when it finds errors; that's expected. Only bail if no JSON.
-    if not result.stdout.strip():
-        logger.debug("pyright produced no JSON output (stderr: %s)", result.stderr[:300])
-        return {}
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("pyright JSON parse failed: %s", e)
-        return {}
-
-    by_path: Dict[str, List[dict]] = {}
-    for d in data.get("generalDiagnostics") or []:
-        rule = d.get("rule") or ""
-        if rule not in _ALLOWED_RULES:
-            continue
-        file_abs = d.get("file") or ""
         try:
-            rel = str(Path(file_abs).resolve().relative_to(repo_root.resolve())).replace("\\", "/")
-        except (ValueError, OSError):
-            rel = Path(file_abs).name
-        # pyright range lines are 0-based; convert to 1-based new-file line numbers.
-        start = (d.get("range") or {}).get("start") or {}
-        line = int(start.get("line", 0)) + 1
-        by_path.setdefault(rel, []).append({
-            "line": line,
-            "message": (d.get("message") or "").strip(),
-            "severity": "ERROR",
-            "check_id": f"pyright/{rule}",
-        })
-    return by_path
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(repo_root),
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("pyright timed out after %ss", timeout)
+            return {}
+        except Exception as e:
+            logger.warning("pyright failed to run: %s", e)
+            return {}
+
+        # pyright exits non-zero when it finds errors; that's expected. Only bail if no JSON.
+        if not result.stdout.strip():
+            logger.debug("pyright produced no JSON output (stderr: %s)", result.stderr[:300])
+            return {}
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("pyright JSON parse failed: %s", e)
+            return {}
+
+        by_path: Dict[str, List[dict]] = {}
+        for d in data.get("generalDiagnostics") or []:
+            rule = d.get("rule") or ""
+            if rule not in _ALLOWED_RULES:
+                continue
+            message = (d.get("message") or "").strip()
+            file_abs = d.get("file") or ""
+            try:
+                rel = str(Path(file_abs).resolve().relative_to(repo_root.resolve())).replace("\\", "/")
+            except (ValueError, OSError):
+                rel = Path(file_abs).name
+            # pyright range lines are 0-based; convert to 1-based new-file line numbers.
+            start = (d.get("range") or {}).get("start") or {}
+            line = int(start.get("line", 0)) + 1
+
+            # reportAttributeAccessIssue is resolution-sensitive on a bare clone (no deps
+            # installed). Curate it so it only fires when a symbol is provably absent:
+            if rule == "reportAttributeAccessIssue":
+                m = _UNKNOWN_IMPORT_RE.search(message)
+                if m:
+                    # "unknown import symbol" → verify against the real module source.
+                    symbol = m.group(1)
+                    module = _import_module_for_line(repo_root, rel, line)
+                    mod_file = _resolve_module_file(repo_root, module) if module else None
+                    if mod_file is None:
+                        logger.debug(
+                            "[pyright] drop import-symbol FP (module unresolvable/third-party): %s from %s",
+                            symbol, module,
+                        )
+                        continue
+                    if _module_binds_symbol(mod_file, symbol):
+                        logger.debug(
+                            "[pyright] drop import-symbol FP (re-export bound in %s): %s",
+                            mod_file, symbol,
+                        )
+                        continue
+                    # genuinely absent from a resolved first-party module → keep
+                else:
+                    # attribute-on-type subclass is unverifiable from source on a bare
+                    # clone → drop from the floor; the LLM + checklist cover real cases.
+                    logger.debug("[pyright] drop attribute-on-type finding (lift to LLM): %s", message[:80])
+                    continue
+
+            by_path.setdefault(rel, []).append({
+                "line": line,
+                "message": message,
+                "severity": "ERROR",
+                "check_id": f"pyright/{rule}",
+            })
+        return by_path
+    finally:
+        if ephemeral_config is not None:
+            try:
+                ephemeral_config.unlink()
+            except OSError:
+                pass

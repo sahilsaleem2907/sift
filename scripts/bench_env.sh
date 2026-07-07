@@ -8,11 +8,11 @@
 # DeepSeek V4 via OpenRouter — Flash generates per-file, Pro critiques/holistic.
 export LLM_API_BASE="https://openrouter.ai/api/v1"
 export LLM_API_KEY="${OPENROUTER_API_KEY:?source .env first so OPENROUTER_API_KEY is set}"
-export LLM_MODEL="openrouter/deepseek/deepseek-v4-flash"          # per-file generator
-export SIFT_REVIEW_MODEL="openrouter/deepseek/deepseek-v4-pro"    # critic / holistic
+# export LLM_MODEL="openrouter/deepseek/deepseek-v4-flash"          # per-file generator
+# export SIFT_REVIEW_MODEL="openrouter/deepseek/deepseek-v4-pro"    # critic / holistic
 
-# export LLM_MODEL="openrouter/anthropic/claude-haiku-4.5"          # per-file generator
-# export SIFT_REVIEW_MODEL="openrouter/anthropic/claude-sonnet-5"    # critic / holistic
+export LLM_MODEL="openrouter/anthropic/claude-haiku-4.5"          # per-file generator
+export SIFT_REVIEW_MODEL="openrouter/anthropic/claude-sonnet-5"    # critic / holistic
 
 export SIFT_REVIEW_MODEL_BASE_URL="https://openrouter.ai/api/v1"
 export SIFT_REVIEW_MODEL_KEY="${OPENROUTER_API_KEY}"
