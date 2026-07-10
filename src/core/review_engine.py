@@ -16,6 +16,7 @@ from src.core.repo_cache import get_repo_at_commit
 from src.core.codeql_runner import run_codeql, languages_from_paths
 from src.core.pyright_runner import run_pyright
 from src.core.analyzers import run_analyzers
+from src.core.footguns import detect_footguns, format_footgun_notes
 from src.core.version_detect import CANDIDATE_FILES, detect_targets, target_for_path
 from src.core.analysis_routing import (
     FileType,
@@ -893,10 +894,18 @@ async def run_review(
                             path0, len(analyzer_for_promote),
                         )
 
+                    # Curated external-API footgun notes for stdlib/framework gotchas
+                    # the repo tools can't see (see src/core/footguns.py).
+                    footgun_notes = detect_footguns(path0, file_diff, file_content)
+                    external_api_notes = format_footgun_notes(footgun_notes)
+                    if footgun_notes:
+                        logger.debug("[footguns] %s: %d note(s) injected", path0, len(footgun_notes))
+
                     file_pr_context = {
                         **(pr_context or {}),
                         "semgrep_findings": semgrep_for_llm,
                         "codeql_findings": codeql_for_llm,
+                        "external_api_notes": external_api_notes or None,
                         "pyright_findings": pyright_for_promote,
                         "analyzer_findings": analyzer_for_promote,
                         "runtime_target": (

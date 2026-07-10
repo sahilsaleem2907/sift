@@ -126,7 +126,12 @@ def test_curate_drops_thirdparty_import_symbol(tmp_path: Path):
     assert out == {}
 
 
-def test_curate_drops_attribute_on_type(tmp_path: Path):
+def test_curate_keeps_attribute_on_type(tmp_path: Path):
+    # pyright only emits reportAttributeAccessIssue for a RESOLVED owning type
+    # (stdlib via typeshed, or first-party via src on path); an uninstalled
+    # third-party is Unknown and produces no diagnostic. So an attribute-on-type
+    # finding that reaches here is reliable and must be KEPT — e.g. the real
+    # `queue.Queue.shutdown` missing pre-3.13 API-existence bug.
     (tmp_path / "m.py").write_text("x = 1\n")
     diag = {
         "file": f"{tmp_path}/m.py",
@@ -135,7 +140,8 @@ def test_curate_drops_attribute_on_type(tmp_path: Path):
         "rule": "reportAttributeAccessIssue",
         "range": {"start": {"line": 0, "character": 0}},
     }
-    assert _run_with_diag(tmp_path, diag, ["m.py"]) == {}  # attribute-on-type → lifted (dropped from floor)
+    out = _run_with_diag(tmp_path, diag, ["m.py"])
+    assert out["m.py"][0]["check_id"] == "pyright/reportAttributeAccessIssue"
 
 
 def test_run_pyright_skips_when_unavailable(tmp_path: Path):

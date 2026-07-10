@@ -223,11 +223,28 @@ def _parse_holistic_response(raw: str) -> list[Finding]:
             continue
         if line <= 0:
             continue
+        # Contract-drift only: require both anchors (changed definition + stale caller).
+        # A finding that can't cite both is an opinion, not a drift bug — drop it.
+        def_loc = (item.get("def_location") or "").strip()
+        caller_loc = (item.get("caller_location") or "").strip()
+        if ":" not in def_loc or ":" not in caller_loc:
+            logger.debug(
+                "[holistic] drop finding without two-sided citation: %r", item.get("title")
+            )
+            continue
+        # Surface both anchors in the posted comment.
+        item = {
+            **item,
+            "body": f"{(item.get('body') or '').strip()}\n\n"
+                    f"Contract drift — changed definition: {def_loc}; stale caller: {caller_loc}.",
+        }
         impact = _parse_impact(item.get("impact"))
         certainty = _parse_certainty(item.get("certainty"))
-        category = (item.get("category") or "design").lower()
+        # Contract drift is a runtime break: default to correctness (survives the
+        # design/maintainability gate) rather than 'design'.
+        category = (item.get("category") or "correctness").lower()
         if category not in CATEGORIES:
-            category = "design"
+            category = "correctness"
         post_inline = item.get("post_inline", True)
         if isinstance(post_inline, str):
             post_inline = post_inline.lower() not in ("false", "0", "no")

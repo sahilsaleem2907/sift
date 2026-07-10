@@ -4,6 +4,11 @@ from src.intelligence.schema import Certainty, Finding, Impact
 
 _UNVERIFIED_PREFIX = "[Unverified — needs manual check] "
 
+# Categories that are noise on a correctness-focused review unless the finding is
+# CONFIRMED (a concrete failing scenario, or corroborated by a static tool). Coupling/
+# abstraction/naming/duplication/style comments scored ~0% precision on the benchmark.
+_OPINION_CATEGORIES = frozenset({"design", "maintainability", "style"})
+
 
 def apply_severity_gate(findings: list[Finding], plan: EffortPlan) -> list[Finding]:
     """Filter and adjust findings using impact × certainty rules."""
@@ -13,6 +18,11 @@ def apply_severity_gate(findings: list[Finding], plan: EffortPlan) -> list[Findi
         if f.critic_exempt:
             # Static-tool findings are pre-confirmed; skip all noise filtering
             out.append(f)
+            continue
+        # Confirmed-only gate: design/maintainability/style are dropped unless the
+        # finding earned CONFIRMED certainty. Correctness/security/perf/resource are
+        # unaffected here and pass through on the impact × certainty rules below.
+        if f.category in _OPINION_CATEGORIES and f.certainty != Certainty.CONFIRMED:
             continue
         if f.impact == Impact.TRIVIAL:
             continue

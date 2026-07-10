@@ -8,7 +8,7 @@ import re
 from typing import Any, Optional
 
 from src.intelligence import llm_client
-from src.intelligence.schema import Certainty, Finding, Impact
+from src.intelligence.schema import CATEGORIES, Certainty, Finding, Impact
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,18 @@ def _infer_category_from_body(body: str) -> str:
     return "correctness"
 
 
+def resolve_category(comment: dict[str, Any]) -> str:
+    """Prefer the model's explicit `category` field; fall back to badge inference.
+
+    The badge maps WARNING->correctness, which hides design/coupling comments under
+    'correctness' and lets them bypass the category gate. The explicit field fixes that.
+    """
+    explicit = (comment.get("category") or "").strip().lower()
+    if explicit in CATEGORIES:
+        return explicit
+    return _infer_category_from_body(comment.get("body") or "")
+
+
 def _infer_certainty_from_body(body: str) -> Certainty:
     m = _SEV_BADGE_RE.search(body)
     if m and m.group(1).lower() == "informational":
@@ -79,7 +91,7 @@ async def generate_candidates(
                 body=c["body"],
                 impact=_infer_impact_from_body(c["body"]),
                 certainty=_infer_certainty_from_body(c["body"]),
-                category=_infer_category_from_body(c["body"]),
+                category=resolve_category(c),
                 origin="llm",
                 fix=None,
                 post_inline=c.get("post_inline", True),

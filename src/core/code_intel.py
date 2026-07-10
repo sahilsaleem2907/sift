@@ -24,6 +24,18 @@ _MAX_MATCHES = 40
 _MAX_READ_LINES = 160
 _GREP_TIMEOUT = 20
 
+# Appended when a symbol resolves to nothing in the checkout. The repo tools are
+# repo-only (git grep + tree-sitter), so a stdlib/framework/third-party symbol is
+# structurally invisible to them — a bare "not found" makes the model treat a real
+# external-API bug as unconfirmable and stay silent. This tells it to fall back to
+# its own knowledge for out-of-repo symbols.
+_EXTERNAL_HINT = (
+    "This may be an external symbol (standard library, framework, or third-party) "
+    "that lives outside this repository, so the repo tools cannot inspect it. If so, "
+    "rely on your own knowledge of that library at the stated target runtime version "
+    "to decide — do not treat 'not found here' as proof it is safe."
+)
+
 
 def _safe_path(repo_root: str, path: str) -> Optional[Path]:
     """Resolve `path` under repo_root, refusing escapes outside the checkout."""
@@ -96,7 +108,7 @@ def find_definition(repo_root: str, symbol: str) -> str:
     pattern = rf"(^|[[:space:]])(def|class|func|function|type|interface|struct)[[:space:]]+{sym}{b}"
     matches = _git_grep(repo_root, ["-nE", pattern])
     if not matches:
-        return f"[no definition found for '{sym}']"
+        return f"[no definition found for '{sym}' in this repo. {_EXTERNAL_HINT}]"
     return "\n".join(matches)
 
 
@@ -227,7 +239,11 @@ def get_mro(repo_root: str, path: str, class_name: str) -> str:
     for base in bases:
         base_hits = _git_grep(repo_root, ["-lE", rf"(^|[[:space:]])class[[:space:]]+{base}([^[:alnum:]_]|$)"])
         if not base_hits:
-            lines.append(f"  base {base}: [definition not found in repo]")
+            lines.append(
+                f"  base {base}: [definition not found in repo — likely external "
+                f"(stdlib/framework/third-party); rely on your knowledge of {base} "
+                "and its abstract methods / type hierarchy at the target runtime]"
+            )
             continue
         base_file = base_hits[0]
         base_src = _read_source(repo_root, base_file)

@@ -252,10 +252,15 @@ def run_pyright(
                         continue
                     # genuinely absent from a resolved first-party module → keep
                 else:
-                    # attribute-on-type subclass is unverifiable from source on a bare
-                    # clone → drop from the floor; the LLM + checklist cover real cases.
-                    logger.debug("[pyright] drop attribute-on-type finding (lift to LLM): %s", message[:80])
-                    continue
+                    # attribute-on-type (e.g. `queue.Queue.shutdown` missing pre-3.13).
+                    # KEEP: pyright only emits reportAttributeAccessIssue for a RESOLVED
+                    # owning type. On a bare clone an uninstalled third-party import is
+                    # typed Unknown, so attribute access on it produces no diagnostic at
+                    # all — meaning the findings that DO reach here are stdlib (bundled
+                    # typeshed, version-pinned via --pythonversion) or first-party (src on
+                    # path), both reliable. Dropping them wholesale discarded real
+                    # version/API-existence bugs (the exact class this floor targets).
+                    logger.debug("[pyright] keep attribute-on-type finding: %s", message[:80])
 
             by_path.setdefault(rel, []).append({
                 "line": line,

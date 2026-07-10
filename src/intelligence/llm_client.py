@@ -452,6 +452,7 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                     "line": line_int,
                     "body": body,
                     "post_inline": True,
+                    "category": item.get("category"),
                 })
         logger.debug(
             "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
@@ -766,6 +767,9 @@ async def review_file(
                 "version, and do NOT add hypothetical 'if this runs on an older version' caveats — "
                 "the target IS this version."
             )
+        external_api_notes = pr_context.get("external_api_notes")
+        if external_api_notes:
+            user_parts.append(external_api_notes)
         file_context = pr_context.get("file_context")
         if file_context:
             fc_block = _format_file_context(file_context)

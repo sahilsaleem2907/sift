@@ -73,6 +73,8 @@ async def test_review_holistic_returns_findings():
     mock_raw = """[{
         "path": "app/api.py",
         "line": 4,
+        "def_location": "auth.py:2",
+        "caller_location": "app/api.py:4",
         "title": "Caller not updated",
         "body": "verify_token signature changed",
         "impact": "high",
@@ -150,6 +152,8 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     holistic_raw = """[{
         "path": "app/api.py",
         "line": 4,
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/api.py:4",
         "title": "Duplicate",
         "body": "same issue",
         "impact": "high",
@@ -159,11 +163,13 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     }, {
         "path": "app/other.py",
         "line": 2,
-        "title": "New cross-file",
-        "body": "design issue",
-        "impact": "low",
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/other.py:2",
+        "title": "New cross-file caller not updated",
+        "body": "stale caller of changed verify() signature",
+        "impact": "high",
         "certainty": "likely",
-        "category": "design",
+        "category": "correctness",
         "post_inline": true
     }]"""
     pr_meta = PRMeta(

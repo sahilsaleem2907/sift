@@ -325,9 +325,9 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
 async def _findings_from_raw(raw: str, path: str) -> list[Finding]:
     from src.intelligence.llm_client import parse_with_repair
     from src.intelligence.passes.candidates import (
-        _infer_category_from_body,
         _infer_certainty_from_body,
         _infer_impact_from_body,
+        resolve_category,
     )
 
     async def _recall(repair_prompt: str) -> str:
@@ -349,7 +349,7 @@ async def _findings_from_raw(raw: str, path: str) -> list[Finding]:
                 body=c["body"],
                 impact=_infer_impact_from_body(c["body"]),
                 certainty=_infer_certainty_from_body(c["body"]),
-                category=_infer_category_from_body(c["body"]),
+                category=resolve_category(c),
                 origin="agentic",
                 fix=None,
                 post_inline=c.get("post_inline", True),
@@ -382,6 +382,18 @@ async def agentic_review(
         "Review the diff below. You may call tools to inspect other PR files or "
         "function bodies before emitting findings as a JSON array.\n\n"
     )
+    # Grounding the per-file reviewer already gets (review_file) but the agentic loop
+    # previously omitted: the authoritative target runtime and curated footgun notes.
+    runtime_target = pr_context.get("runtime_target")
+    if runtime_target:
+        user_content += (
+            f"Target runtime for this file: {runtime_target} — AUTHORITATIVE. Assume every "
+            "API/method/parameter available in this version exists; do not add 'older version' "
+            "caveats.\n\n"
+        )
+    external_api_notes = pr_context.get("external_api_notes")
+    if external_api_notes:
+        user_content += external_api_notes + "\n\n"
     if extra:
         user_content += extra + "\n\n---\n\n"
     user_content += annotated

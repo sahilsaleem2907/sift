@@ -256,6 +256,9 @@ def _verification_context(pr_context: Optional[dict[str, Any]]) -> str:
             f"Target runtime: {rt} (authoritative — an API/method/param that exists in this "
             "version is NOT a bug)."
         )
+    notes = pr_context.get("external_api_notes")
+    if notes:
+        parts.append(notes)
     sba = pr_context.get("semantic_before_after")
     if sba and str(sba).strip():
         parts.append("Changed functions (before/after):\n" + str(sba).strip())
