@@ -1,0 +1,15 @@
+{
+  "id": "008_caller_not_updated",
+  "description": "Function signature changed in auth.py but caller in api.py not updated",
+  "path": "app/api.py",
+  "diff_file": "case_008_caller_not_updated.diff",
+  "expected": [
+    {
+      "line_range": [1, 5],
+      "category": "correctness",
+      "min_impact": "medium",
+      "note": "verify_token return type changed from bool to dict; api.py call site unchanged"
+    }
+  ],
+  "false_positives": []
+}

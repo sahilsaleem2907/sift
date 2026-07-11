@@ -1,0 +1,22 @@
+{
+  "id": "011_hardcoded_secret_typo",
+  "description": "VS Code extension with hardcoded GitHub token, API typo, and disabled equality lint rule",
+  "path": "src/extension.ts",
+  "diff_file": "case_011_hardcoded_secret_typo.diff",
+  "expected": [
+    {
+      "line_range": [27, 27],
+      "categories": ["security"],
+      "min_impact": "high",
+      "note": "Hardcoded GitHub token ghp_* — must-always-find (target hit-rate 100%)",
+      "must_find": true
+    },
+    {
+      "line_range": [10, 10],
+      "categories": ["correctness"],
+      "min_impact": "high",
+      "note": "vscde.commands.registerCommand typo — undefined reference at runtime"
+    }
+  ],
+  "false_positives": []
+}

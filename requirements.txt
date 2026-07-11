@@ -8,9 +8,10 @@ python-dotenv>=1.0.0
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.9
 semgrep>=1.0.0
-tree_sitter
-tree_sitter_languages
-pylint>=3.0.0
+tree_sitter==0.21.3
+tree_sitter_languages==1.10.2
+ruff>=0.8.0
+bandit>=1.7.0
 pgvector>=0.3.0
 litellm==1.82.2
 boto3

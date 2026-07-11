@@ -1,0 +1,8 @@
+{
+  "id": "006_false_positive_type_annotation",
+  "description": "Adding type annotations only — should not flag issues",
+  "path": "app/utils.py",
+  "diff_file": "case_006_false_positive_type_annotation.py.diff",
+  "expected": [],
+  "false_positives": [2]
+}
