@@ -24,7 +24,7 @@ ENV SIFT_API_BACKEND_BASE_URL="https://api.sift-agent.com"
 WORKDIR /app
 COPY . .
 EXPOSE 8000
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "sift.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # --- Stage 3: full (slim + CodeQL + all linters via scripts) ---
 FROM slim AS full

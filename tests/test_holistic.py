@@ -4,17 +4,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.core.import_analyzer import CallerInfo
-from src.intelligence.ast.function_extract import FunctionChunk
-from src.intelligence.capability import ModelCapability
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.passes.holistic import (
+from sift.core.import_analyzer import CallerInfo
+from sift.intelligence.ast.function_extract import FunctionChunk
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.passes.holistic import (
     PRDigest,
     build_digest,
     review_holistic,
 )
-from src.intelligence.passes.pipeline import PRMeta, run_pipeline_holistic
-from src.intelligence.schema import Certainty, Finding, Impact
+from sift.intelligence.passes.pipeline import PRMeta, run_pipeline_holistic
+from sift.intelligence.schema import Certainty, Finding, Impact
 
 
 def _chunk(path: str, name: str, start: int, end: int) -> FunctionChunk:
@@ -83,7 +83,7 @@ async def test_review_holistic_returns_findings():
     plan = plan_for(EffortLevel.BALANCED)
     cap = ModelCapability(8192, 2048, False, False)
     with mock.patch(
-        "src.intelligence.passes.holistic._call_llm",
+        "sift.intelligence.passes.holistic._call_llm",
         new=AsyncMock(return_value=mock_raw),
     ):
         findings = await review_holistic(digest, plan, cap)
@@ -105,7 +105,7 @@ async def test_review_holistic_empty_when_no_edges():
     plan = plan_for(EffortLevel.BALANCED)
     cap = ModelCapability(8192, 2048, False, False)
     with mock.patch(
-        "src.intelligence.passes.holistic._call_llm",
+        "sift.intelligence.passes.holistic._call_llm",
         new=AsyncMock(),
     ) as mock_llm:
         findings = await review_holistic(digest, plan, cap)
@@ -128,7 +128,7 @@ async def test_review_holistic_parse_failure_returns_empty():
     plan = plan_for(EffortLevel.BALANCED)
     cap = ModelCapability(8192, 2048, False, False)
     with mock.patch(
-        "src.intelligence.passes.holistic._call_llm",
+        "sift.intelligence.passes.holistic._call_llm",
         new=AsyncMock(return_value="not valid json at all"),
     ):
         findings = await review_holistic(digest, plan, cap)
@@ -178,7 +178,7 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     plan = plan_for(EffortLevel.BALANCED)
     cap = ModelCapability(8192, 2048, False, False)
     with mock.patch(
-        "src.intelligence.passes.holistic._call_llm",
+        "sift.intelligence.passes.holistic._call_llm",
         new=AsyncMock(return_value=holistic_raw),
     ):
         findings = await run_pipeline_holistic([per_file], pr_meta, plan, cap)

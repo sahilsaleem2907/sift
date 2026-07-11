@@ -6,7 +6,7 @@ Regression coverage for the parser bug that shipped silently through PRs
 in that prose (e.g. "[L10]") defeated the old first-bracket-to-last-bracket
 parser, producing zero findings with no visible error.
 """
-from src.intelligence.llm_client import (
+from sift.intelligence.llm_client import (
     _balanced_array_end,
     _extract_json_array,
     _parse_review_file_response,

@@ -1,5 +1,5 @@
 """Tests for src.intelligence.schema."""
-from src.intelligence.schema import (
+from sift.intelligence.schema import (
     Certainty,
     Finding,
     Impact,

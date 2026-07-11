@@ -8,8 +8,8 @@ Covers:
 - derive_severity projection: category=security, impact=low → "suggestion";
   category=security, impact=high → "security".
 """
-from src.intelligence.prompts import REVIEW_FILE_SYSTEM
-from src.intelligence.schema import derive_severity, Impact, Certainty
+from sift.intelligence.prompts import REVIEW_FILE_SYSTEM
+from sift.intelligence.schema import derive_severity, Impact, Certainty
 
 
 # ---- derive_severity projection (the lever the rule relies on) ----

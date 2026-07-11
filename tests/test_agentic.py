@@ -4,12 +4,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src import config
-from src.intelligence.ast.function_extract import FunctionChunk
-from src.intelligence.capability import ModelCapability
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.passes.agentic import TOOLS, agentic_review
-from src.intelligence.passes.pipeline import FileReviewInput
+from sift import config
+from sift.intelligence.ast.function_extract import FunctionChunk
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.passes.agentic import TOOLS, agentic_review
+from sift.intelligence.passes.pipeline import FileReviewInput
 
 
 def _mock_message(content=None, tool_calls=None):
@@ -72,7 +72,7 @@ async def test_agentic_tool_call_resolved():
     resp_final.choices = [MagicMock(message=final_msg)]
 
     with mock.patch(
-        "src.intelligence.passes.agentic.acompletion",
+        "sift.intelligence.passes.agentic.acompletion",
         new=AsyncMock(side_effect=[resp_tool, resp_final]),
     ):
         findings = await agentic_review(
@@ -108,7 +108,7 @@ async def test_agentic_respects_step_cap():
     config.SIFT_AGENTIC_MAX_STEPS = 2
     try:
         with mock.patch(
-            "src.intelligence.passes.agentic.acompletion",
+            "sift.intelligence.passes.agentic.acompletion",
             new=AsyncMock(side_effect=[resp_tool, resp_tool, resp_final]),
         ) as mock_llm:
             findings = await agentic_review(file_input, plan, cap, {"app/a.py": "x=1\n"})
@@ -125,13 +125,13 @@ async def test_agentic_non_tool_model_falls_back_to_generate_candidates():
     file_input = FileReviewInput(path="app/a.py", file_diff="+x\n", pr_context={})
 
     with mock.patch(
-        "src.intelligence.passes.agentic.agentic_review",
+        "sift.intelligence.passes.agentic.agentic_review",
         new=AsyncMock(),
     ) as mock_agentic:
-        from src.intelligence.passes.pipeline import run_pipeline_per_file
+        from sift.intelligence.passes.pipeline import run_pipeline_per_file
 
         with mock.patch(
-            "src.intelligence.passes.candidates.llm_client.review_file",
+            "sift.intelligence.passes.candidates.llm_client.review_file",
             new=AsyncMock(return_value=[]),
         ):
             await run_pipeline_per_file(file_input, "t", plan, cap, None)
@@ -149,11 +149,11 @@ async def test_agentic_error_falls_back():
     )
 
     with mock.patch(
-        "src.intelligence.passes.agentic.acompletion",
+        "sift.intelligence.passes.agentic.acompletion",
         new=AsyncMock(side_effect=RuntimeError("api down")),
     ):
         with mock.patch(
-            "src.intelligence.passes.agentic.generate_candidates",
+            "sift.intelligence.passes.agentic.generate_candidates",
             new=AsyncMock(return_value=[]),
         ) as mock_gen:
             findings = await agentic_review(file_input, plan, cap, {})

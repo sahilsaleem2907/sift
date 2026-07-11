@@ -9,4 +9,4 @@ __pycache__/
 *.pyz
 *.pywz
 *.pyzz
-docs/plans/*
+docs/plans/*sift.egg-info/

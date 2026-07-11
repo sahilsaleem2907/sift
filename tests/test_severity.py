@@ -1,7 +1,7 @@
 """Tests for src.intelligence.passes.severity."""
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.passes.severity import apply_severity_gate, _UNVERIFIED_PREFIX
-from src.intelligence.schema import Certainty, Finding, Impact
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.passes.severity import apply_severity_gate, _UNVERIFIED_PREFIX
+from sift.intelligence.schema import Certainty, Finding, Impact
 
 
 def _finding(impact: Impact, certainty: Certainty, body: str = "body") -> Finding:

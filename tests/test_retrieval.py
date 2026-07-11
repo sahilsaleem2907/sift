@@ -1,8 +1,8 @@
 """Tests for Phase 4 context retrieval."""
-from src.intelligence.ast.function_extract import FunctionChunk
-from src.intelligence.capability import ModelCapability
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.retrieval import (
+from sift.intelligence.ast.function_extract import FunctionChunk
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.retrieval import (
     FileContext,
     _callee_signatures,
     _semantic_before_after,

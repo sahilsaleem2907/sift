@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.intelligence.capability import ModelCapability
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.passes.pipeline import FileReviewInput, PRMeta, run_pipeline
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.passes.pipeline import FileReviewInput, PRMeta, run_pipeline
 
 
 @pytest.mark.asyncio
@@ -32,10 +32,10 @@ async def test_pipeline_matches_review_file():
     ]
 
     with mock.patch(
-        "src.intelligence.passes.candidates.llm_client.review_file",
+        "sift.intelligence.passes.candidates.llm_client.review_file",
         new=AsyncMock(return_value=mock_comments),
     ):
-        from src.intelligence import llm_client
+        from sift.intelligence import llm_client
 
         old_comments = await llm_client.review_file(diff, path, pr_ctx)
 

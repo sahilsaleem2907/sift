@@ -3,14 +3,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.intelligence.capability import ModelCapability
-from src.intelligence.passes.critic import (
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.passes.critic import (
     critique,
     critique_batched,
     rule_dedupe,
 )
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.schema import Certainty, Finding, Impact
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.schema import Certainty, Finding, Impact
 
 
 def _finding(line: int = 10, impact: Impact = Impact.HIGH) -> Finding:
@@ -30,7 +30,7 @@ def _finding(line: int = 10, impact: Impact = Impact.HIGH) -> Finding:
 async def test_batched_keeps_real_bug():
     findings = [_finding()]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(
             return_value='[{"index": 0, "verdict": "keep", "impact": "high", '
             '"certainty": "confirmed", "reason": "valid"}]'
@@ -46,7 +46,7 @@ async def test_batched_keeps_real_bug():
 async def test_batched_drops_false_positive():
     findings = [_finding(impact=Impact.LOW)]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(
             return_value='[{"index": 0, "verdict": "drop", "reason": "style nit"}]'
         ),
@@ -60,7 +60,7 @@ async def test_batched_drops_false_positive():
 async def test_batched_missing_verdict_keeps():
     findings = [_finding(), _finding(line=20)]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(return_value="[]"),
     ):
         cap = ModelCapability(8192, 2048, False, False)

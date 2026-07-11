@@ -1,6 +1,6 @@
 """Tests for static_promote._build_finding title enrichment."""
-from src.intelligence.passes.static_promote import _build_finding
-from src.intelligence.schema import Impact, Certainty
+from sift.intelligence.passes.static_promote import _build_finding
+from sift.intelligence.schema import Impact, Certainty
 
 
 _SECRET_FINDING = {
