@@ -580,18 +580,16 @@ def store_tool_cache(entries: List[Dict[str, Any]]) -> None:
     if not entries:
         return
     now = datetime.now(timezone.utc)
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for e in entries:
+        deduped[e["cache_key"]] = {
+            "cache_key": e["cache_key"],
+            "tool": e["tool"],
+            "findings_json": e["findings_json"],
+            "created_at": now,
+        }
     with session_scope() as session:
-        stmt = pg_insert(ToolResultCache).values(
-            [
-                {
-                    "cache_key": e["cache_key"],
-                    "tool": e["tool"],
-                    "findings_json": e["findings_json"],
-                    "created_at": now,
-                }
-                for e in entries
-            ]
-        )
+        stmt = pg_insert(ToolResultCache).values(list(deduped.values()))
         stmt = stmt.on_conflict_do_update(
             index_elements=["cache_key"],
             set_={
