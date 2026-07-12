@@ -51,6 +51,12 @@ Rules:
 - Return [] if there is nothing significant to report.
 """
 
+TEST_FILE_APPENDIX = """This file is a test, fixture, or mock. Review it through a test lens, NOT a production-security lens:
+- Intentional insecurity is EXPECTED and correct here. Do NOT flag as security/vulnerability: hardcoded fixture credentials, mock/fake secrets, tokens or API keys that are obviously test values (e.g. "AKIAFAKE...", "sk-test-...", "password123"), SQL-injection / XSS / path-traversal strings used as test INPUTS, eval/exec/deserialization of controlled test data, or weak crypto (md5, DES) used to exercise a code path. These are the point of the test.
+- Focus ONLY on test-logic correctness: assertions that can never fail (assert True, assertTrue(True)), tests that assert nothing, wrong expected values, a test that exercises the wrong thing or has an inverted condition, incorrect mock/stub/patch setup (patching the wrong target, a mock that never gets asserted), resource leaks in setup/teardown, and nondeterministic/flaky constructs (real time, network, ordering assumptions).
+- Real credentials that look genuinely live (a valid-looking production key committed into a test) are still worth a "security" finding — but a value that is clearly a placeholder or dummy is not.
+"""
+
 SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
 CRITIC_BATCHED_SYSTEM = """You are a second-pass code reviewer verifying a list of proposed

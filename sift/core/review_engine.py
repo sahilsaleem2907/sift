@@ -17,6 +17,7 @@ from sift.core.analysis_routing import (
     FileType,
     classify_file_type,
     get_tools_for_file,
+    is_test_path,
     risk_level,
     score_risk_combined,
 )
@@ -261,6 +262,7 @@ async def run_review(
                 # Smart routing: classify and score each path; build tool path sets
                 path_to_file_type: Dict[str, FileType] = {}
                 path_to_risk: Dict[str, Any] = {}  # RiskLevel
+                path_to_is_test: Dict[str, bool] = {}
                 linter_paths: Set[str] = set()
                 semgrep_paths: Set[str] = set()
                 codeql_paths: Set[str] = set()
@@ -305,9 +307,11 @@ async def run_review(
                             except Exception as e:
                                 logger.debug("AST function extract failed for %s: %s", path, e)
                         rl = risk_level(sc)
+                        is_test = is_test_path(path)
                         path_to_file_type[path] = ft
                         path_to_risk[path] = rl
-                        tools_set = get_tools_for_file(ft, rl, path)
+                        path_to_is_test[path] = is_test
+                        tools_set = get_tools_for_file(ft, rl, path, is_test=is_test)
                         if "linter" in tools_set:
                             linter_paths.add(path)
                         if "semgrep" in tools_set and config.SEMGREP_ENABLED:
@@ -319,8 +323,8 @@ async def run_review(
                         parts = [f"{k}+{v}" for k, v in breakdown.items() if v > 0]
                         reason = " ".join(parts) if parts else "no factors"
                         logger.debug(
-                            "[Smart routing] %s → type=%s score=%s level=%s → tools=[%s]",
-                            path, ft.value, sc, rl.value, tools_str,
+                            "[Smart routing] %s → type=%s%s score=%s level=%s → tools=[%s]",
+                            path, ft.value, " (test)" if is_test else "", sc, rl.value, tools_str,
                         )
                         logger.debug(
                             "[Smart routing]   risk reason: %s (total=%s)",
@@ -765,7 +769,10 @@ async def run_review(
                     # Fires regardless of whether Semgrep is installed or which
                     # ruleset it uses — findings are semgrep-shaped so they flow
                     # through promote_static_findings as CRITICAL + critic_exempt.
-                    builtin_secret_findings = scan_diff_for_secrets(file_diff)
+                    # Skip on test files: fixture credentials / mock secrets are
+                    # intentional there, and promotion would make them un-suppressable.
+                    is_test0 = path_to_is_test.get(path0, False)
+                    builtin_secret_findings = [] if is_test0 else scan_diff_for_secrets(file_diff)
                     if builtin_secret_findings:
                         logger.debug(
                             "[secret_scan] %s: %d built-in secret finding(s)",
@@ -786,6 +793,7 @@ async def run_review(
                         "repo_feedback_labeled_comments": _labeled_comments_text or None,
                         "ast_diff": ast_diff_result,
                         "caller_context": caller_context,
+                        "is_test": is_test0,
                     }
 
                     if config.VECTOR_DB_ENABLED:

@@ -69,6 +69,49 @@ def classify_file_type(path: str) -> FileType:
     return FileType.CODE  # default unknown to code so we don't skip by mistake
 
 
+# --- Test-file detection (path-only) -----------------------------------------
+
+# Directory segments that mark test / fixture / mock trees across ecosystems.
+# Matched as whole path segments so substrings ("latest", "contest") don't trip.
+_TEST_DIR_PATTERN = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|__mocks__|spec|specs|testdata|fixtures?|e2e)(?:/|$)",
+    re.IGNORECASE,
+)
+# Java/Kotlin convention: source root src/test/... (and src/androidTest/...).
+_TEST_SRC_ROOT_PATTERN = re.compile(r"(?:^|/)src/(?:test|androidtest)(?:/|$)", re.IGNORECASE)
+# Filename conventions per language.
+_TEST_FILE_PATTERN = re.compile(
+    r"(?:"
+    r"^test_[^/]*\.py$"          # Python: test_*.py
+    r"|_test\.py$"                # Python: *_test.py
+    r"|^conftest\.py$"           # Python: conftest.py
+    r"|_test\.go$"               # Go: *_test.go
+    r"|\.test\.[jt]sx?$"         # JS/TS: *.test.{js,jsx,ts,tsx}
+    r"|\.spec\.[jt]sx?$"         # JS/TS: *.spec.{js,jsx,ts,tsx}
+    r"|tests?\.(?:java|kt|cs)$"  # JVM/C#: *Test.java, *Tests.kt, *Test.cs (case-insensitive)
+    r"|_spec\.rb$"               # Ruby: *_spec.rb
+    r"|_test\.rb$"               # Ruby: *_test.rb
+    r"|test\.php$"               # PHP: *Test.php
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_test_path(path: str) -> bool:
+    """True if the path looks like a test, fixture, or mock file (path-only).
+
+    Covers common multi-language conventions by directory segment (tests/, spec/,
+    __tests__/, testdata/, fixtures/, e2e/, src/test/) and by filename
+    (test_*.py, *_test.go, *.spec.ts, *Test.java, *_spec.rb, ...). Cannot detect
+    inline test code inside a production file (e.g. Rust #[cfg(test)] modules).
+    """
+    p = path.replace("\\", "/").strip()
+    name = Path(p).name
+    if _TEST_DIR_PATTERN.search(p) or _TEST_SRC_ROOT_PATTERN.search(p):
+        return True
+    return bool(_TEST_FILE_PATTERN.search(name))
+
+
 # --- Risk scoring (path + content) --------------------------------------------
 
 # Tiered path sensitivity: high (+30), medium (+15), framework (+10)
@@ -266,9 +309,18 @@ def risk_level(score: int) -> RiskLevel:
 # --- Routing matrix ----------------------------------------------------------
 
 def get_tools_for_file(
-    file_type: FileType, risk: RiskLevel, path: str = ""
+    file_type: FileType, risk: RiskLevel, path: str = "", is_test: bool = False
 ) -> FrozenSet[str]:
-    """Return which tools to run for this file. Values: 'linter', 'semgrep', 'codeql'."""
+    """Return which tools to run for this file. Values: 'linter', 'semgrep', 'codeql'.
+
+    Test files keep the linter but drop semgrep/codeql: their ERROR/secret findings
+    would auto-promote as un-suppressable, and intentional insecurity (fixture
+    credentials, injection payloads) is expected in test code.
+    """
+    if is_test:
+        base = get_tools_for_file(file_type, risk, path, is_test=False)
+        return base - {"semgrep", "codeql"}
+
     if file_type == FileType.DOCUMENTATION or file_type == FileType.ASSETS:
         return frozenset()
 

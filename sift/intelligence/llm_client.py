@@ -13,7 +13,7 @@ litellm.suppress_debug_info = True
 
 from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
-from sift.intelligence.prompts import REVIEW_FILE_SYSTEM
+from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, TEST_FILE_APPENDIX
 
 logger = logging.getLogger(__name__)
 
@@ -759,7 +759,10 @@ async def review_file(
         logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
-    raw = await _call_llm(REVIEW_FILE_SYSTEM, user_content)
+    system_prompt = REVIEW_FILE_SYSTEM
+    if (pr_context or {}).get("is_test"):
+        system_prompt = REVIEW_FILE_SYSTEM + TEST_FILE_APPENDIX
+    raw = await _call_llm(system_prompt, user_content)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
     return _parse_review_file_response(raw, path)
 
