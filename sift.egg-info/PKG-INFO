@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: sift
-Version: 0.5.0
+Version: 0.5.1
 Requires-Python: >=3.11
 License-File: LICENSE
 Requires-Dist: fastapi>=0.109.0

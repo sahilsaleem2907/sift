@@ -65,11 +65,13 @@ tests/test_agentic.py
 tests/test_capability.py
 tests/test_critic.py
 tests/test_effort.py
+tests/test_forge_builder_registry.py
 tests/test_forge_extensibility.py
 tests/test_holistic.py
 tests/test_llm_client.py
 tests/test_pipeline_phase1.py
 tests/test_retrieval.py
+tests/test_review_endpoint.py
 tests/test_review_quality_pr21.py
 tests/test_review_quality_pr23.py
 tests/test_schema.py

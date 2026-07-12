@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from sift import config
 from sift.core.review_engine import run_review
-from sift.integrations.github_client import make_github_forge_builder
+from sift.integrations.registry import get_forge_builder
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -26,14 +26,21 @@ def _check_api_key(authorization: Optional[str] = None) -> None:
 
 
 class ReviewRequestBody(BaseModel):
-    """JSON body for POST /review."""
+    """JSON body for POST /review.
 
+    ``provider`` selects the forge (default 'github', preserving the original contract).
+    Credentials are provider-specific: GitHub uses ``github_token``/``installation_id``;
+    other providers (e.g. Bitbucket) use the generic ``token`` field.
+    """
+
+    provider: str = "github"
     owner: str
     repo: str
     pr_number: int
     before_sha: Optional[str] = None
     github_token: Optional[str] = None
     installation_id: Optional[int] = None
+    token: Optional[str] = None
 
 
 @router.post("/review")
@@ -42,22 +49,23 @@ async def review(
     background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> dict:
-    """Trigger a PR review (GitHub Actions flow). Auth via Bearer token if SIFT_API_KEY is set.
-    Provide exactly one of github_token or installation_id. Returns 202 Accepted."""
+    """Trigger a PR review (CI flow, e.g. GitHub Actions / Bitbucket Pipelines).
+
+    Auth via Bearer token if SIFT_API_KEY is set. The forge is selected by ``provider``
+    and its builder is resolved from the forge-builder registry, so this endpoint is
+    provider-agnostic. Returns 202 Accepted."""
     _check_api_key(authorization)
 
-    has_token = bool(body.github_token)
-    has_installation = body.installation_id is not None
-    if has_token == has_installation:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide exactly one of github_token or installation_id",
-        )
+    try:
+        factory = get_forge_builder(body.provider)
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    forge_builder = await make_github_forge_builder(
-        installation_id=body.installation_id,
-        github_token=body.github_token,
-    )
+    try:
+        forge_builder = await factory(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     background_tasks.add_task(
         run_review,
         forge_builder,
@@ -67,11 +75,11 @@ async def review(
         before_sha=body.before_sha,
     )
     logger.info(
-        "Queued review for %s/%s PR #%s (auth=%s)",
+        "Queued review for %s/%s PR #%s (provider=%s)",
         body.owner,
         body.repo,
         body.pr_number,
-        "token" if has_token else "installation_id",
+        body.provider,
     )
     return JSONResponse(
         content={"status": "accepted", "message": "Review queued"},
