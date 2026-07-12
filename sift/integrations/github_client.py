@@ -366,3 +366,20 @@ async def make_github_forge_builder(
         return GitHubClient(iid, token=token)
 
     return _builder
+
+
+async def github_review_adapter(body: Any):
+    """Builder factory for the GitHub provider (registered into the forge-builder registry).
+
+    Resolves credentials from a POST /review request body (duck-typed): exactly one of
+    ``github_token`` or ``installation_id`` must be provided. Raises ValueError otherwise
+    so the endpoint can return 400.
+    """
+    github_token = getattr(body, "github_token", None)
+    installation_id = getattr(body, "installation_id", None)
+    if bool(github_token) == (installation_id is not None):
+        raise ValueError("Provide exactly one of github_token or installation_id")
+    return await make_github_forge_builder(
+        installation_id=installation_id,
+        github_token=github_token,
+    )
