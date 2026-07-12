@@ -1,0 +1,39 @@
+name: Sift PR Review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  sift:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: sahilsaleem2907/sift/.github/workflows/sift-review.yml@master
+    with:
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+      before_sha: ${{ github.event.before }}
+      auth_mode: installation_id
+    secrets:
+      SIFT_IMAGE: ${{ secrets.SIFT_IMAGE }}
+      SIFT_DATABASE_URL: ${{ secrets.SIFT_DATABASE_URL }}
+      SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
+      SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
+      SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
+      SIFT_LLM_API_BASE: ${{ secrets.SIFT_LLM_API_BASE }}
+      SIFT_REVIEW_EFFORT: ${{ secrets.SIFT_REVIEW_EFFORT }}
+      SIFT_REVIEW_MODEL: ${{ secrets.SIFT_REVIEW_MODEL }}
+      SIFT_REVIEW_MODEL_KEY: ${{ secrets.SIFT_REVIEW_MODEL_KEY }}
+      SIFT_REVIEW_MODEL_BASE_URL: ${{ secrets.SIFT_REVIEW_MODEL_BASE_URL }}
+      SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
+      GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+      SIFT_GITHUB_TOKEN: ${{ secrets.SIFT_GITHUB_TOKEN }}
+      SIFT_API_BACKEND_BASE_URL: ${{ secrets.SIFT_API_BACKEND_BASE_URL }}
+      SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
+      SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
+      SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
+      SIFT_SEMGREP_ENABLED: ${{ secrets.SIFT_SEMGREP_ENABLED }}
+      SIFT_CODEQL_ENABLED: ${{ secrets.SIFT_CODEQL_ENABLED }}
+      SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
+      SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}

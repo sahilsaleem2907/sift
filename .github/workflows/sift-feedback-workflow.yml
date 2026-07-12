@@ -1,0 +1,30 @@
+name: Sift Feedback
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  feedback:
+    uses: sahilsaleem2907/sift/.github/workflows/sift-feedback.yml@master
+    with:
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+      merged: ${{ github.event.pull_request.merged }}
+    secrets:
+      SIFT_IMAGE: ${{ secrets.SIFT_IMAGE }}
+      SIFT_DATABASE_URL: ${{ secrets.SIFT_DATABASE_URL }}
+      SIFT_API_KEY: ${{ secrets.SIFT_API_KEY }}
+      SIFT_LLM_MODEL: ${{ secrets.SIFT_LLM_MODEL }}
+      SIFT_LLM_API_KEY: ${{ secrets.SIFT_LLM_API_KEY }}
+      SIFT_LLM_API_BASE: ${{ secrets.SIFT_LLM_API_BASE }}
+      SIFT_INSTALLATION_ID: ${{ secrets.SIFT_INSTALLATION_ID }}
+      GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+      SIFT_GITHUB_TOKEN: ${{ secrets.SIFT_GITHUB_TOKEN }}
+      SIFT_API_BACKEND_BASE_URL: ${{ secrets.SIFT_API_BACKEND_BASE_URL }}
+      SIFT_EMBEDDING_MODEL: ${{ secrets.SIFT_EMBEDDING_MODEL }}
+      SIFT_EMBEDDING_API_BASE: ${{ secrets.SIFT_EMBEDDING_API_BASE }}
+      SIFT_EMBEDDING_DIMENSION: ${{ secrets.SIFT_EMBEDDING_DIMENSION }}
+      SIFT_SEMGREP_ENABLED: ${{ secrets.SIFT_SEMGREP_ENABLED }}
+      SIFT_CODEQL_ENABLED: ${{ secrets.SIFT_CODEQL_ENABLED }}
+      SIFT_VECTOR_DB_ENABLED: ${{ secrets.SIFT_VECTOR_DB_ENABLED }}
+      SIFT_SMART_ROUTING_ENABLED: ${{ secrets.SIFT_SMART_ROUTING_ENABLED }}
