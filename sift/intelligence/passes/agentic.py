@@ -16,6 +16,7 @@ from sift.intelligence.llm_client import (
     _annotate_diff_with_line_numbers,
     _parse_review_file_response,
 )
+from sift.intelligence.prompts import TEST_FILE_APPENDIX
 from sift.intelligence.passes.candidates import generate_candidates
 from sift.intelligence.passes.pipeline import FileReviewInput
 from sift.intelligence.retrieval import FileContext
@@ -221,8 +222,11 @@ async def agentic_review(
         user_content += extra + "\n\n---\n\n"
     user_content += annotated
 
+    system_prompt = REVIEW_FILE_SYSTEM
+    if pr_context.get("is_test"):
+        system_prompt = REVIEW_FILE_SYSTEM + TEST_FILE_APPENDIX
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": REVIEW_FILE_SYSTEM},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
 
