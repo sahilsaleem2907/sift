@@ -175,7 +175,7 @@ async def run_review(
     repo: str,
     pr_number: int,
     before_sha: Optional[str] = None,
-) -> None:
+) -> Optional[List[Finding]]:
     """Run the full review flow: fetch diff, split by file, per-file LLM, summarize, post inline comments + summary, store.
 
     forge_builder is a zero-arg callable that returns a ForgeProvider async context manager.
@@ -196,7 +196,7 @@ async def run_review(
                 )
                 if not diff.strip():
                     logger.warning("Empty diff for %s PR #%s", repo_full, pr_number)
-                    return
+                    return []
 
                 commit_id = await github.get_pr_head_commit(owner, repo, pr_number)
                 _commit_id = commit_id
@@ -222,7 +222,7 @@ async def run_review(
                             "Sift review passed — no file changes",
                             config.SIFT_STATUS_CONTEXT,
                         )
-                    return
+                    return []
 
                 diff_lines_per_path: Dict[str, Set[int]] = {
                     path: get_diff_line_numbers(fd) for path, fd in file_chunks
@@ -1007,6 +1007,7 @@ async def run_review(
                         state,
                     )
                 logger.info("Review completed for %s PR #%s", repo_full, pr_number)
+                return all_findings
             except Exception as inner_e:
                 logger.exception(
                     "Review failed for %s PR #%s: %s", repo_full, pr_number, inner_e
