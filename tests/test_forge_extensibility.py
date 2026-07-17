@@ -35,7 +35,7 @@ FAKE_COMMENT_BODY = (
 )
 
 
-async def _critic_passthrough(findings, *args, **kwargs):
+def _critic_passthrough(findings, *args, **kwargs):
     return findings
 
 
