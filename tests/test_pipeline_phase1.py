@@ -23,11 +23,20 @@ async def test_pipeline_matches_review_file():
     path = "app/test.py"
     pr_ctx = {"title": "test", "body": ""}
 
+    # Shape mirrors _parse_review_file_response output: canonical badge in the
+    # body plus the structured severity/confidence fields.
     mock_comments = [
         {
             "line": 3,
-            "body": "![BUG](https://img.shields.io/badge/BUG-AA0000) Null deref\n\ny may be None.",
+            "body": (
+                "![BUG](https://img.shields.io/badge/BUG-AA0000?style=for-the-badge) "
+                "Null deref\n\ny may be None."
+            ),
             "post_inline": True,
+            "severity": "bug",
+            "title": "Null deref",
+            "confidence": 9,
+            "fix": None,
         }
     ]
 

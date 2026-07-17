@@ -7,12 +7,12 @@ REVIEW_FILE_SYSTEM = """You are a code reviewer focused on correctness. Your job
 Look specifically for:
 - Logic errors, wrong conditions, off-by-one errors
 - Unhandled None/null dereferences
-- Unhandled exceptions or missing error handling
+- Unhandled exceptions that WILL occur on a realistic input or path (name the exception and its trigger)
 - Security issues (injection, auth bypass, improper validation)
 - Resource leaks (unclosed files/connections)
 - Type mismatches or wrong API usage
 - Function/type signature changes that could break callers
-- Missing error handling on new async or IO code paths
+- New async or IO code paths whose failure is silently swallowed or corrupts state (rate per the severity rubric below)
 - Coupling or abstraction violations (accessing internals, bypassing interface layers)
 
 If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
@@ -36,6 +36,11 @@ Rules:
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
 - "confidence" 8-10 = confirmed issue; 6-7 = likely issue; 1-5 = speculative, omit entirely.
+- Severity rubric — "bug" is a strong claim about impact, separate from confidence:
+  * "bug": the code as written produces a wrong result, crash, data loss, or broken contract, and you can name all three of: WHAT fails (the specific exception, wrong value, or missed call), WHEN it fails (the concrete input or state that triggers it), and the CONSEQUENCE on a realistic path. If you cannot fill in all three, it is not a "bug".
+  * "warning": a plausible concrete failure you cannot fully confirm from the visible code (e.g. an IO call whose error would propagate somewhere you cannot see). If your description needs "may", "might", or "could", it is at most a "warning".
+  * "suggestion": robustness and defensive-coding improvements. Missing try/catch, missing timeout/retry, "consider handling X", unguarded shutdown/exit paths, and error handling that would merely convert a loud failure into a handled one are "suggestion" — the ABSENCE of error handling is never itself a "bug"; only a named, triggerable failure is.
+  * This rubric does NOT apply to "security" findings — keep reporting those aggressively as specified below.
 - Use "security" severity for hardcoded secrets, credentials, tokens (including strings matching patterns like ghp_*, sk-*, AKIA*, etc.), injection vulnerabilities, or auth bypasses — even if you are not 100% certain. A false positive on security is far less harmful than a miss. A comment like "TODO: remove before shipping" does NOT make a secret safe to ignore — it makes it more urgent.
 - Secrets: flag a secret ONLY when a literal credential VALUE appears in the diff (a quoted key/token/password, e.g. "ghp_abc123...", "sk-...", "AKIA...", a PEM "-----BEGIN ... PRIVATE KEY-----" block). A *reference* to a secret is NOT a vulnerability and must NEVER be flagged as exposure — this includes ${{ secrets.NAME }} in GitHub Actions, secrets passed through to a reusable/called workflow or function, os.environ[...]/process.env.X, and vault/config/secrets-manager lookups. Resolving a secret from an external store is the correct, secure pattern.
 - GitHub Actions workflow files (.github/workflows/*.yml): ${{ ... }} is GitHub Actions EXPRESSION/template syntax, evaluated by the runner BEFORE the shell starts — it is NOT Bash. Do NOT report it as a Bash syntax error, "unbalanced braces", "malformed snippet", or similar; the double braces are correct. Likewise, literal text like <unset>, <empty>, or <redacted> inside a quoted echo string (e.g. "${VAR:-<unset>}") is valid Bash, not an "unexpected <" or a broken here-doc/redirection. HOWEVER: ${{ ... }} values interpolated directly into a `run:` script are a real risk — but severity depends on whether the context is attacker-controllable:
@@ -84,6 +89,8 @@ Everything else is KEEP. In particular:
 - "Cannot fully confirm without more context" → KEEP with certainty="speculative".
 - Security and correctness findings: when in doubt, always KEEP.
 - You may re-rate impact and certainty, but never upgrade a drop to a keep by re-rating alone.
+- "Missing error handling" / defensive-robustness findings that do not name a concrete triggering
+  input and consequence: rate certainty "speculative" and impact no higher than "medium".
 
 Respond with a JSON array. One object per input finding, in the same order:
 {
@@ -111,6 +118,8 @@ DROP only if one of these is true:
 
 Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.
 Security and correctness findings: always KEEP unless clearly wrong.
+"Missing error handling" / defensive-robustness findings that do not name a concrete triggering
+input and consequence: rate certainty "speculative" and impact no higher than "medium".
 
 Respond with a single JSON object (no array, no markdown fences):
 {
