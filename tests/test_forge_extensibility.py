@@ -30,9 +30,13 @@ FAKE_PR_DETAILS = {
 }
 
 FAKE_COMMENT_BODY = (
-    "![BUG](https://img.shields.io/badge/BUG-AA0000) Null dereference\n\n"
+    "![BUG](https://img.shields.io/badge/BUG-AA0000?style=for-the-badge) Null dereference\n\n"
     "`y` may be None before `.upper()` is called."
 )
+
+
+def _critic_passthrough(findings, *args, **kwargs):
+    return findings
 
 
 class DummyForge(ForgeProvider):
@@ -162,10 +166,15 @@ async def test_dummy_forge_drives_run_review() -> None:
         "line": 3,
         "body": FAKE_COMMENT_BODY,
         "post_inline": True,
+        "severity": "bug",
+        "title": "Null dereference",
+        "confidence": 9,
+        "fix": None,
     }
 
     with (
         patch("sift.intelligence.passes.candidates.llm_client.review_file", new=AsyncMock(return_value=[fake_finding])),
+        patch("sift.intelligence.passes.critic.critique", new=_critic_passthrough),
         patch("sift.core.review_engine.summarize_review", new=AsyncMock(return_value="Summary of review.")),
         patch("sift.core.review_engine.run_linters", return_value={}),
         patch("sift.core.review_engine.run_semgrep", return_value={}),

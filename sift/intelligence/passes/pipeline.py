@@ -119,7 +119,10 @@ async def run_pipeline_holistic(
     """Holistic pass, dedupe holistic findings, severity gate."""
     from sift.intelligence.passes.critic import rule_dedupe
     from sift.intelligence.passes.holistic import build_digest, review_holistic
-    from sift.intelligence.passes.severity import apply_severity_gate
+    from sift.intelligence.passes.severity import (
+        apply_final_severity_labels,
+        apply_severity_gate,
+    )
 
     all_findings = list(all_per_file_findings)
 
@@ -150,7 +153,7 @@ async def run_pipeline_holistic(
             holistic = rule_dedupe(holistic)
             all_findings.extend(holistic)
 
-    return apply_severity_gate(all_findings, plan)
+    return apply_final_severity_labels(apply_severity_gate(all_findings, plan))
 
 
 async def run_pipeline(

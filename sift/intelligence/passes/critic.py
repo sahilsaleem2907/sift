@@ -98,22 +98,21 @@ def _apply_verdict(finding: Finding, verdict_obj: dict) -> Optional[Finding]:
 
 
 def _clamp_certainty_for_critic(findings: list[Finding]) -> list[Finding]:
-    """Raise certainty to at least LIKELY for security/high-impact findings.
+    """Raise certainty to at least LIKELY for security findings.
 
     The generator prompt can self-downgrade security findings to SPECULATIVE when
     it's uncertain. The critic then sees SPECULATIVE and is tempted to drop. This
     clamp breaks that self-defeating loop: the critic must make an affirmative
-    factual case to drop, not just exploit a low certainty score.
+    factual case to drop, not just exploit a low certainty score. (Drop
+    prevention for security/CRITICAL findings lives in _apply_verdict.)
 
-    Only affects non-exempt findings passed to the critic; does not change the
-    final Finding stored in output (certainty is re-rated by the critic anyway).
+    Non-security findings keep their true certainty: a HIGH-impact correctness
+    finding at SPECULATIVE should stay speculative so it renders as WARNING
+    rather than being silently promoted back toward BUG.
     """
     clamped = []
     for f in findings:
-        if (
-            f.certainty == Certainty.SPECULATIVE
-            and (f.category == "security" or f.impact in (Impact.CRITICAL, Impact.HIGH))
-        ):
+        if f.certainty == Certainty.SPECULATIVE and f.category == "security":
             f = Finding(
                 path=f.path,
                 line=f.line,

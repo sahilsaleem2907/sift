@@ -53,6 +53,35 @@ def test_legacy_mapping_round_trip_severity():
             assert f.severity() == "informational"
 
 
+def test_from_legacy_item_confidence_boundaries():
+    """Confidence maps to certainty: 8+ confirmed, 7 likely, <=6 speculative."""
+    expected = {
+        5: Certainty.SPECULATIVE,
+        6: Certainty.SPECULATIVE,
+        7: Certainty.LIKELY,
+        8: Certainty.CONFIRMED,
+    }
+    for conf, certainty in expected.items():
+        item = {"line": 1, "severity": "bug", "title": "t", "confidence": conf}
+        f = from_legacy_item(item, "a.py", "body")
+        assert f.certainty == certainty, f"confidence={conf}"
+        assert f.impact == Impact.HIGH
+
+
+def test_from_legacy_item_bug_low_confidence_is_warning():
+    """The PR #24 regression lever: a shaky 'bug' projects to warning, not bug."""
+    item = {"line": 1, "severity": "bug", "title": "Missing try/catch", "confidence": 6}
+    f = from_legacy_item(item, "a.py", "body")
+    assert f.severity() == "warning"
+
+
+def test_from_legacy_item_origin_and_post_inline():
+    item = {"line": 1, "severity": "warning", "title": "t", "confidence": 9}
+    f = from_legacy_item(item, "a.py", "body", origin="agentic", post_inline=False)
+    assert f.origin == "agentic"
+    assert f.post_inline is False
+
+
 def test_to_comment_dict():
     f = Finding(
         path="x.py",

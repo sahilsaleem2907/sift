@@ -407,6 +407,10 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                     "line": line_int,
                     "body": body,
                     "post_inline": True,
+                    "severity": (item.get("severity") or "suggestion").lower(),
+                    "title": (item.get("title") or "").strip(),
+                    "confidence": confidence,
+                    "fix": item.get("fix") or None,
                 })
         logger.debug(
             "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
@@ -437,7 +441,15 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
                 "body": body_txt or title,
             })
             if body.strip():
-                out.append({"line": line_int, "body": body, "post_inline": True})
+                out.append({
+                    "line": line_int,
+                    "body": body,
+                    "post_inline": True,
+                    "severity": severity.lower(),
+                    "title": title,
+                    "confidence": 7,
+                    "fix": None,
+                })
                 logger.debug("LLM tab-format finding: file=%s line=%s sev=%s title=%r", path, line_int, severity, title)
         if out:
             return out
@@ -469,7 +481,15 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
         if not body:
             continue
         body = _normalize_comment_body(body)
-        out.append({"line": line_int, "body": body})
+        # severity=None marks "no structured label"; consumers fall back to defaults
+        out.append({
+            "line": line_int,
+            "body": body,
+            "severity": None,
+            "title": "",
+            "confidence": 7,
+            "fix": None,
+        })
     return out
 
 
