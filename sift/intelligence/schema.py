@@ -103,7 +103,13 @@ def confidence_to_certainty(confidence: int) -> Certainty:
     return Certainty.SPECULATIVE
 
 
-def from_legacy_item(item: dict, path: str, body: str) -> Finding:
+def from_legacy_item(
+    item: dict,
+    path: str,
+    body: str,
+    origin: str = "llm",
+    post_inline: bool = True,
+) -> Finding:
     """Build a Finding from existing LLM JSON output and formatted body."""
     old_sev = (item.get("severity") or "suggestion").lower()
     try:
@@ -123,7 +129,7 @@ def from_legacy_item(item: dict, path: str, body: str) -> Finding:
         impact=_OLD_SEVERITY_TO_IMPACT.get(old_sev, Impact.LOW),
         certainty=certainty,
         category=_OLD_SEVERITY_TO_CATEGORY.get(old_sev, "maintainability"),
-        origin="llm",
+        origin=origin,
         fix=(item.get("fix") or None),
-        post_inline=True,
+        post_inline=post_inline,
     )

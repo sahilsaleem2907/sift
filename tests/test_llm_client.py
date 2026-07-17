@@ -133,3 +133,32 @@ def test_parse_review_full_seam_pr238():
 
 def test_parse_review_genuinely_empty_returns_empty():
     assert _parse_review_file_response("<reasoning>looks fine</reasoning>\n[]", "f.ts") == []
+
+
+# ---- structured fields carried through the parser (PR #24 severity fix) ----
+
+def test_parse_json_carries_severity_title_confidence():
+    out = _parse_review_file_response(PR_238_RAW, "src/extension.ts")
+    by_line = {c["line"]: c for c in out}
+    assert by_line[10]["severity"] == "bug"
+    assert by_line[10]["title"] == "Typo in namespace"
+    assert by_line[10]["confidence"] == 10
+    assert by_line[25]["severity"] == "security"
+    assert by_line[11]["confidence"] == 9
+
+
+def test_parse_tab_format_carries_severity():
+    raw = "[L12]\twarning\tPossible race\tTwo writers touch the same key."
+    out = _parse_review_file_response(raw, "x.py")
+    assert len(out) == 1
+    assert out[0]["severity"] == "warning"
+    assert out[0]["title"] == "Possible race"
+    assert out[0]["confidence"] == 7
+
+
+def test_parse_freeform_has_no_structured_label():
+    raw = "Line 8: this loop never terminates when items is empty."
+    out = _parse_review_file_response(raw, "x.py")
+    assert len(out) == 1
+    assert out[0]["severity"] is None
+    assert out[0]["confidence"] == 7

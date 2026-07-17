@@ -5,6 +5,7 @@ import pytest
 
 from sift.intelligence.capability import ModelCapability
 from sift.intelligence.passes.critic import (
+    _clamp_certainty_for_critic,
     critique,
     critique_batched,
     rule_dedupe,
@@ -82,3 +83,23 @@ def test_rule_dedupe_keeps_higher_impact():
     result = rule_dedupe([low, high])
     assert len(result) == 1
     assert result[0].impact == Impact.HIGH
+
+
+def _speculative(category: str, impact: Impact = Impact.HIGH) -> Finding:
+    f = _finding(impact=impact)
+    return Finding(
+        path=f.path, line=f.line, title=f.title, body=f.body,
+        impact=impact, certainty=Certainty.SPECULATIVE,
+        category=category, origin=f.origin,
+    )
+
+
+def test_clamp_leaves_high_correctness_speculative():
+    """HIGH-impact correctness findings keep their speculative certainty (PR #24)."""
+    out = _clamp_certainty_for_critic([_speculative("correctness")])
+    assert out[0].certainty == Certainty.SPECULATIVE
+
+
+def test_clamp_still_raises_security_speculative():
+    out = _clamp_certainty_for_critic([_speculative("security")])
+    assert out[0].certainty == Certainty.LIKELY
