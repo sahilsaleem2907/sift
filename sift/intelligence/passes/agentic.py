@@ -169,30 +169,10 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
 
 
 def _findings_from_raw(raw: str, path: str) -> list[Finding]:
-    from sift.intelligence.passes.candidates import (
-        _infer_category_from_body,
-        _infer_certainty_from_body,
-        _infer_impact_from_body,
-    )
+    from sift.intelligence.passes.candidates import finding_from_comment
 
     comments = _parse_review_file_response(raw, path)
-    findings: list[Finding] = []
-    for c in comments:
-        findings.append(
-            Finding(
-                path=path,
-                line=c["line"],
-                title="",
-                body=c["body"],
-                impact=_infer_impact_from_body(c["body"]),
-                certainty=_infer_certainty_from_body(c["body"]),
-                category=_infer_category_from_body(c["body"]),
-                origin="agentic",
-                fix=None,
-                post_inline=c.get("post_inline", True),
-            )
-        )
-    return findings
+    return [finding_from_comment(c, path, origin="agentic") for c in comments]
 
 
 async def agentic_review(
