@@ -35,6 +35,7 @@ from sift.intelligence.passes.pipeline import (
     run_pipeline_holistic,
     run_pipeline_per_file,
 )
+from sift.intelligence.passes.severity import apply_final_severity_labels
 from sift.intelligence.schema import Finding
 from sift.storage.database import (
     get_avg_quality_score_for_path_pattern,
@@ -909,6 +910,11 @@ async def run_review(
                     )
                 except Exception as e:
                     logger.warning("Holistic pipeline stage failed: %s", e)
+
+                # Re-render badges from final impact × certainty even when the
+                # holistic stage (which normally does this) failed above.
+                # Idempotent, so the common path is unaffected.
+                all_findings = apply_final_severity_labels(all_findings)
 
                 collected: List[Dict[str, Any]] = [
                     {
