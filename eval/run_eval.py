@@ -21,19 +21,19 @@ from pathlib import Path
 
 from eval.schema import ExpectedFinding, GoldenCase
 from eval.secret_scan import scan_diff_for_secrets
-from src import config
-from src.core.import_analyzer import resolve_pr_import_graph
-from src.core.pr_analyzer import split_diff_by_file
-from src.intelligence.ast.function_extract import extract_modified_functions
-from src.intelligence.capability import detect
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.passes.pipeline import (
+from sift import config
+from sift.core.import_analyzer import resolve_pr_import_graph
+from sift.core.pr_analyzer import split_diff_by_file
+from sift.intelligence.ast.function_extract import extract_modified_functions
+from sift.intelligence.capability import detect
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.passes.pipeline import (
     FileReviewInput,
     PRMeta,
     run_pipeline_holistic,
     run_pipeline_per_file,
 )
-from src.intelligence.schema import Impact
+from sift.intelligence.schema import Impact
 
 _IMPACT_RANK = {i.value: n for n, i in enumerate(Impact)}
 CASES_DIR = Path(__file__).parent / "cases"
