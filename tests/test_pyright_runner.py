@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from src.core import pyright_runner
-from src.core.pyright_runner import detect_target_python, run_pyright
+from sift.core import pyright_runner
+from sift.core.pyright_runner import detect_target_python, run_pyright
 
 
 # --- target-version detection (delegates to the shared PythonVersionDetector) --

@@ -1,5 +1,5 @@
 """Tests for src.core.version_detect."""
-from src.core.version_detect import (
+from sift.core.version_detect import (
     CANDIDATE_FILES,
     GoVersionDetector,
     JavaVersionDetector,

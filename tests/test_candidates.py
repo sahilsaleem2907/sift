@@ -1,5 +1,5 @@
 """Tests for candidate category resolution (explicit field vs badge inference)."""
-from src.intelligence.passes.candidates import resolve_category
+from sift.intelligence.passes.candidates import resolve_category
 
 
 def test_explicit_category_used():

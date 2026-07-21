@@ -1,5 +1,5 @@
 """Tests for the deterministic AST verdict analyzers (language seam)."""
-from src.core.analyzers import run_analyzers
+from sift.core.analyzers import run_analyzers
 
 
 def _full_add_diff(src: str) -> str:

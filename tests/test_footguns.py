@@ -1,5 +1,5 @@
 """Tests for the curated external-API footgun registry."""
-from src.core.footguns import detect_footguns, format_footgun_notes
+from sift.core.footguns import detect_footguns, format_footgun_notes
 
 
 def _diff(*added: str) -> str:
