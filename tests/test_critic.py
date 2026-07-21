@@ -1,18 +1,19 @@
-"""Tests for src.intelligence.passes.critic."""
+"""Tests for sift.intelligence.passes.critic."""
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.intelligence.capability import ModelCapability
-from src.intelligence.passes.critic import (
+from sift.intelligence.capability import ModelCapability
+from sift.intelligence.passes.critic import (
+    _clamp_certainty_for_critic,
     _verification_context,
     critique,
     critique_batched,
     critique_per_finding,
     rule_dedupe,
 )
-from src.intelligence.effort import EffortLevel, plan_for
-from src.intelligence.schema import Certainty, Finding, Impact
+from sift.intelligence.effort import EffortLevel, plan_for
+from sift.intelligence.schema import Certainty, Finding, Impact
 
 
 def _finding(line: int = 10, impact: Impact = Impact.HIGH, category: str = "correctness") -> Finding:
@@ -32,7 +33,7 @@ def _finding(line: int = 10, impact: Impact = Impact.HIGH, category: str = "corr
 async def test_batched_keeps_real_bug():
     findings = [_finding()]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(
             return_value='[{"index": 0, "verdict": "keep", "impact": "high", '
             '"certainty": "confirmed", "reason": "valid"}]'
@@ -48,7 +49,7 @@ async def test_batched_keeps_real_bug():
 async def test_batched_drops_false_positive():
     findings = [_finding(impact=Impact.LOW)]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(
             return_value='[{"index": 0, "verdict": "drop", "reason": "style nit"}]'
         ),
@@ -62,7 +63,7 @@ async def test_batched_drops_false_positive():
 async def test_batched_missing_verdict_keeps():
     findings = [_finding(), _finding(line=20)]
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(return_value="[]"),
     ):
         cap = ModelCapability(8192, 2048, False, False)
@@ -115,7 +116,7 @@ async def test_per_finding_threads_verification_context_into_prompt():
         "runtime_target": "Python 3.13 (min of requires-python)",
         "callee_signatures": "def get_stats(): return {'total_items': sum(depths)}",
     }
-    with patch("src.intelligence.passes.critic._call_llm", new=_fake):
+    with patch("sift.intelligence.passes.critic._call_llm", new=_fake):
         cap = ModelCapability(8192, 2048, False, False)
         await critique_per_finding([_finding()], "diff", "title", cap, pr_context)
     assert "Verification context" in captured["user"]
@@ -126,7 +127,7 @@ async def test_per_finding_threads_verification_context_into_prompt():
 @pytest.mark.asyncio
 async def test_per_finding_drop_honored_with_context():
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(return_value='{"verdict": "drop", "reason": "get_stats returns total_items"}'),
     ):
         cap = ModelCapability(8192, 2048, False, False)
@@ -141,7 +142,7 @@ async def test_per_finding_drop_honored_with_context():
 async def test_per_finding_security_never_dropped():
     """Security findings survive a drop verdict (guard intact after context change)."""
     with patch(
-        "src.intelligence.passes.critic._call_llm",
+        "sift.intelligence.passes.critic._call_llm",
         new=AsyncMock(return_value='{"verdict": "drop", "reason": "x"}'),
     ):
         cap = ModelCapability(8192, 2048, False, False)
@@ -149,3 +150,21 @@ async def test_per_finding_security_never_dropped():
             [_finding(category="security")], "diff", "title", cap, {"runtime_target": "Python 3.13"},
         )
     assert len(kept) == 1
+def _speculative(category: str, impact: Impact = Impact.HIGH) -> Finding:
+    f = _finding(impact=impact)
+    return Finding(
+        path=f.path, line=f.line, title=f.title, body=f.body,
+        impact=impact, certainty=Certainty.SPECULATIVE,
+        category=category, origin=f.origin,
+    )
+
+
+def test_clamp_leaves_high_correctness_speculative():
+    """HIGH-impact correctness findings keep their speculative certainty (PR #24)."""
+    out = _clamp_certainty_for_critic([_speculative("correctness")])
+    assert out[0].certainty == Certainty.SPECULATIVE
+
+
+def test_clamp_still_raises_security_speculative():
+    out = _clamp_certainty_for_critic([_speculative("security")])
+    assert out[0].certainty == Certainty.LIKELY

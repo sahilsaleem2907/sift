@@ -6,10 +6,10 @@ Covers:
 - A1 safety net: the deterministic secret scanner flags literal credential
   values but never secret *references* (${{ secrets.X }}, env lookups).
 """
-from src import config
-from src.core.secret_scan import scan_diff_for_secrets
-from src.core.semgrep_runner import _semgrep_handles_language
-from src.intelligence.llm_client import _format_file_context
+from sift import config
+from sift.core.secret_scan import scan_diff_for_secrets
+from sift.core.semgrep_runner import _semgrep_handles_language
+from sift.intelligence.llm_client import _format_file_context
 
 
 # ---- A4: full-file vs range rendering ----

@@ -8,7 +8,7 @@ parser, producing zero findings with no visible error.
 """
 import pytest
 
-from src.intelligence.llm_client import (
+from sift.intelligence.llm_client import (
     _balanced_array_end,
     _build_structured_summary,
     _extract_json_array,
@@ -239,3 +239,30 @@ async def test_summarize_review_appends_off_diff_to_inline():
     assert "Sift Review" in out                       # main table present
     assert "Findings not on changed lines" in out     # off-diff section appended
     assert "SpawnProcess isinstance check" in out
+# ---- structured fields carried through the parser (PR #24 severity fix) ----
+
+def test_parse_json_carries_severity_title_confidence():
+    out = _parse_review_file_response(PR_238_RAW, "src/extension.ts")
+    by_line = {c["line"]: c for c in out}
+    assert by_line[10]["severity"] == "bug"
+    assert by_line[10]["title"] == "Typo in namespace"
+    assert by_line[10]["confidence"] == 10
+    assert by_line[25]["severity"] == "security"
+    assert by_line[11]["confidence"] == 9
+
+
+def test_parse_tab_format_carries_severity():
+    raw = "[L12]\twarning\tPossible race\tTwo writers touch the same key."
+    out = _parse_review_file_response(raw, "x.py")
+    assert len(out) == 1
+    assert out[0]["severity"] == "warning"
+    assert out[0]["title"] == "Possible race"
+    assert out[0]["confidence"] == 7
+
+
+def test_parse_freeform_has_no_structured_label():
+    raw = "Line 8: this loop never terminates when items is empty."
+    out = _parse_review_file_response(raw, "x.py")
+    assert len(out) == 1
+    assert out[0]["severity"] is None
+    assert out[0]["confidence"] == 7

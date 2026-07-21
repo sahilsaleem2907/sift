@@ -2,7 +2,7 @@
 import json
 from unittest import mock
 
-from src.intelligence.capability import ModelCapability, _CACHE, detect
+from sift.intelligence.capability import ModelCapability, _CACHE, detect
 
 
 def setup_function():
@@ -23,7 +23,7 @@ def test_override_wins():
         "supports_function_calling": True,
         "supports_reasoning": False,
     })
-    cap = detect("any/model", override)
+    cap = detect("any/model", override_raw=override)
     assert cap.context_window == 32768
     assert cap.supports_function_calling is True
     assert cap.supports_reasoning is False
@@ -32,7 +32,7 @@ def test_override_wins():
 def test_invalid_override_does_not_crash():
     with mock.patch("litellm.get_model_info", side_effect=Exception("x")):
         with mock.patch("litellm.supports_function_calling", side_effect=Exception("x")):
-            cap = detect("fallback/model", "not-json")
+            cap = detect("fallback/model", override_raw="not-json")
     assert cap.context_window == 8192
 
 

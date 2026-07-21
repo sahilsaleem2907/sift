@@ -2,7 +2,7 @@
 import os
 from unittest import mock
 
-from src.intelligence.effort import EffortLevel, plan_for, resolve_effort
+from sift.intelligence.effort import EffortLevel, plan_for, resolve_effort
 
 
 def test_plan_for_low():
@@ -31,14 +31,14 @@ def test_plan_for_high():
 def test_resolve_effort_valid():
     with mock.patch.dict(os.environ, {"SIFT_REVIEW_EFFORT": "high"}):
         import importlib
-        from src import config
+        from sift import config
         importlib.reload(config)
-        from src.intelligence import effort as effort_mod
+        from sift.intelligence import effort as effort_mod
         importlib.reload(effort_mod)
         assert effort_mod.resolve_effort() == EffortLevel.HIGH
 
 
 def test_resolve_effort_invalid_falls_back():
-    with mock.patch("src.intelligence.effort.config") as cfg:
+    with mock.patch("sift.intelligence.effort.config") as cfg:
         cfg.SIFT_REVIEW_EFFORT = "not-a-level"
         assert resolve_effort() == EffortLevel.BALANCED

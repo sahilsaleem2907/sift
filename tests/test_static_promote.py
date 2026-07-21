@@ -3,12 +3,12 @@ from unittest import mock
 
 import pytest
 
-from src.intelligence.passes.static_promote import (
+from sift.intelligence.passes.static_promote import (
     _build_finding,
     promote_static_findings,
     should_auto_promote,
 )
-from src.intelligence.schema import Impact, Certainty
+from sift.intelligence.schema import Impact, Certainty
 
 
 _PYRIGHT_FINDING = {
@@ -28,7 +28,7 @@ async def test_pyright_finding_promoted_critic_exempt():
     async def _fake_enrich(raw, path, origin, diff):
         return [{"body": f.get("message", ""), "fix": "", "title": ""} for f in raw]
 
-    with mock.patch("src.intelligence.passes.static_promote._enrich_batch", _fake_enrich):
+    with mock.patch("sift.intelligence.passes.static_promote._enrich_batch", _fake_enrich):
         out = await promote_static_findings(
             "pkg/mod.py", "@@ +5 @@\n+ q.shutdown()",
             semgrep_findings=[], codeql_findings=[], pyright_findings=[_PYRIGHT_FINDING],
