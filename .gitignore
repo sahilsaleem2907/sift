@@ -10,5 +10,5 @@ __pycache__/
 *.pywz
 *.pyzz
 docs/plans/*
-sift.egg-info/
+sift.egg-info/*
 
