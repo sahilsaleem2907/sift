@@ -22,6 +22,8 @@ export SIFT_API_KEY="${SIFT_API_KEY:?source .env first so SIFT_API_KEY is set}" 
 # Peak mode — assert on regardless of .env state.
 export SIFT_REVIEW_EFFORT="high"
 export CODEQL_ENABLED="1"
+export CODEQL_SUITE="security-extended"
+export CODEQL_TIMEOUT=1500
 export VECTOR_DB_ENABLED="1"
 export LOG_LEVEL="DEBUG"
 
@@ -30,4 +32,4 @@ export EMBEDDING_MODEL="ollama/nomic-embed-text"
 export EMBEDDING_API_BASE="http://localhost:11434"
 export EMBEDDING_DIMENSION="768"
 
-echo "[bench_env] LLM=$LLM_MODEL critic=$SIFT_REVIEW_MODEL effort=$SIFT_REVIEW_EFFORT codeql=$CODEQL_ENABLED vector=$VECTOR_DB_ENABLED embed=$EMBEDDING_MODEL@$EMBEDDING_DIMENSION"
+echo "[bench_env] LLM=$LLM_MODEL critic=$SIFT_REVIEW_MODEL effort=$SIFT_REVIEW_EFFORT codeql=$CODEQL_ENABLED/$CODEQL_SUITE vector=$VECTOR_DB_ENABLED embed=$EMBEDDING_MODEL@$EMBEDDING_DIMENSION"

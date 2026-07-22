@@ -97,8 +97,24 @@ def _apply_verdict(finding: Finding, verdict_obj: dict) -> Optional[Finding]:
     )
 
 
+# Concurrency findings are inherently non-deterministic (no single triggering input), so the
+# generator prompt tends to self-downgrade them to SPECULATIVE the same way it does for security —
+# text-matched here (there is no dedicated "concurrency" category) so the clamp below can catch it.
+_CONCURRENCY_RE = re.compile(
+    r"\b(race condition|data race|toctou|goroutine|thread-safe|thread safety|"
+    r"unsynchronized|double-checked locking|concurrent(?:ly)? (?:map|access|read|write|"
+    r"modif|mutat)|without (?:a |proper )?(?:lock|synchroniz|atomic)|"
+    r"concurrent map (?:read|write)\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_concurrency(f: Finding) -> bool:
+    return bool(_CONCURRENCY_RE.search(f"{f.title} {f.body}"))
+
+
 def _clamp_certainty_for_critic(findings: list[Finding]) -> list[Finding]:
-    """Raise certainty to at least LIKELY for security findings.
+    """Raise certainty to at least LIKELY for security and concurrency findings.
 
     The generator prompt can self-downgrade security findings to SPECULATIVE when
     it's uncertain. The critic then sees SPECULATIVE and is tempted to drop. This
@@ -106,13 +122,21 @@ def _clamp_certainty_for_critic(findings: list[Finding]) -> list[Finding]:
     factual case to drop, not just exploit a low certainty score. (Drop
     prevention for security/CRITICAL findings lives in _apply_verdict.)
 
-    Non-security findings keep their true certainty: a HIGH-impact correctness
+    Concurrency findings (races, TOCTOU, unsynchronized shared state) get the same
+    treatment: by nature they have no single deterministic triggering input, so the
+    generator readily rates them SPECULATIVE even when the shared-state hazard is
+    real. Text-matched via _looks_like_concurrency since there is no dedicated
+    "concurrency" category (see prompts.py's concurrency carve-out).
+
+    All other findings keep their true certainty: a HIGH-impact correctness
     finding at SPECULATIVE should stay speculative so it renders as WARNING
     rather than being silently promoted back toward BUG.
     """
     clamped = []
     for f in findings:
-        if f.certainty == Certainty.SPECULATIVE and f.category == "security":
+        if f.certainty == Certainty.SPECULATIVE and (
+            f.category == "security" or _looks_like_concurrency(f)
+        ):
             f = Finding(
                 path=f.path,
                 line=f.line,

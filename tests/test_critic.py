@@ -168,3 +168,24 @@ def test_clamp_leaves_high_correctness_speculative():
 def test_clamp_still_raises_security_speculative():
     out = _clamp_certainty_for_critic([_speculative("security")])
     assert out[0].certainty == Certainty.LIKELY
+
+
+def test_clamp_raises_concurrency_speculative():
+    """A self-downgraded race/TOCTOU finding gets the same clamp as security (no
+    single deterministic input, so the generator readily marks it SPECULATIVE)."""
+    f = _finding(category="correctness")
+    f = Finding(
+        path=f.path, line=f.line, title="Race condition on shared cache",
+        body="A race condition allows concurrent goroutines to build the index "
+             "without synchronization, causing a concurrent map write panic.",
+        impact=Impact.HIGH, certainty=Certainty.SPECULATIVE,
+        category="correctness", origin=f.origin,
+    )
+    out = _clamp_certainty_for_critic([f])
+    assert out[0].certainty == Certainty.LIKELY
+
+
+def test_clamp_leaves_unrelated_correctness_speculative():
+    """A plain correctness finding with no concurrency language is unaffected."""
+    out = _clamp_certainty_for_critic([_speculative("correctness")])
+    assert out[0].certainty == Certainty.SPECULATIVE
