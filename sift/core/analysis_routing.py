@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """File type classification, risk scoring, and tool routing for smart analysis.
 
 Routes PR files to linter / semgrep / codeql based on file type and risk level

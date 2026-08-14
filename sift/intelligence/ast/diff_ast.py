@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple

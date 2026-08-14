@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """HTTP endpoint for triggering a PR review (e.g. from GitHub Actions)."""
 import logging
 from typing import Optional
