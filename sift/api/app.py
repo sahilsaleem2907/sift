@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """App factory: build the core Sift FastAPI application.
 
 Enterprise repos call build_app(), then add their own routers and register

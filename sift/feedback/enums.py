@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Enums for feedback events; store values as strings in DB and validate on write."""
 from enum import Enum
 

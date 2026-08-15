@@ -118,10 +118,19 @@ For a developer-grade map of how a review executes end to end, see the **[Flow R
 
 ## Contributing
 
-Issues and pull requests are welcome on [GitHub](https://github.com/sahilsaleem2907/sift).
+Issues and pull requests are welcome on [GitHub](https://github.com/sahilsaleem2907/sift). Sift is free to self-host — bring your own LLM key (BYOK) and run it however you like. If you want better reviews, add a feature or fix a bug and open a PR, or file an issue.
+
+Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/): sign off your commits with `git commit -s`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full flow.
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+Sift is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+**What this means for you:**
+
+- **Self-hosting with your own key is free, forever.** Running Sift internally — including as a service inside your org — carries no obligations.
+- **If you modify Sift and offer it to others over a network**, you must make your modified source available to those users under the same license. This keeps every improvement to Sift open, so no one can take it closed.
+
+Versions released before this change remain available under their original MIT terms; all releases going forward are AGPL-3.0.

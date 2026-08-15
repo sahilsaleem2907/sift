@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Effort levels and per-level execution plans for the review pipeline."""
 import logging
 from dataclasses import dataclass

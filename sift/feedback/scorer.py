@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Basic quality scoring (0-100) from feedback events. Defined formula; read-only."""
 import logging
 from typing import List

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Run Semgrep on a set of file contents; return findings by path. Used for diff-only context."""
 import json
 import logging

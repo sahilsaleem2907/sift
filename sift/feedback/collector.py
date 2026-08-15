@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Feedback collection: command parsing and reaction sync."""
 import re
 import logging
