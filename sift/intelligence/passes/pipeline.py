@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Review pipeline orchestrator.
 
 Phase 3: per-file candidates (+critic) then holistic pass + severity gate.

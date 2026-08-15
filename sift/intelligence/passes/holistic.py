@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Pass 3: whole-PR holistic review for cross-file and design-level issues."""
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Pass 2: critic / verification pass."""
 import asyncio
 import json

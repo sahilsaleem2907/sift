@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Application entrypoint: build the Sift app and register startup hooks."""
 import logging
 

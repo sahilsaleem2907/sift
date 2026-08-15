@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """GitHub API client: installation token, PR diff, post comment."""
 import base64
 import logging
