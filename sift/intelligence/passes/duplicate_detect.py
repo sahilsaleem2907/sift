@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Intra-PR duplicate function detector — deterministic, LLM-free.
 
 Catches copy-paste duplicate logic introduced within a single PR across different

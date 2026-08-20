@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Pass 1: per-file candidate generation.
 
 Phase 1 behaviour: delegates directly to review_file() in llm_client.py and wraps

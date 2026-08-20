@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Evaluate whether a PR should be blocked based on collected review findings."""
 from typing import Any, Dict, List, Tuple
 

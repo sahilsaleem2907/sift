@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """HTTP endpoint for feedback sync (e.g. GitHub Actions on PR closed)."""
 import logging
 from typing import Optional

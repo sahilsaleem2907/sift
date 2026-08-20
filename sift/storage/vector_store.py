@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """pgvector-backed vector store for code chunk similarity search."""
 import logging
 from dataclasses import dataclass

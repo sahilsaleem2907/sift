@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Format past inline-comment feedback for LLM prompts."""
 from typing import Any, Dict, List
 

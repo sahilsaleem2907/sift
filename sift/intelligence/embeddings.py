@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Embeddings client for code similarity search (LiteLLM: Ollama, OpenAI, Gemini, etc.)."""
 import logging
 from typing import List

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Forge provider registry: register and look up ForgeProvider implementations."""
 from typing import Any, Awaitable, Callable, Dict, Type
 

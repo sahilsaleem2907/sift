@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Centralized configuration from environment."""
 import logging
 import os

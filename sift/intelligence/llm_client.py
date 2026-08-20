@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """LLM integration for code review (LiteLLM: OpenAI, Anthropic, Gemini, Ollama, Azure, Bedrock)."""
 import json
 import logging

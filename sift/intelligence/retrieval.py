@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Effort-scaled context assembly for per-file review (Phase 4)."""
 from __future__ import annotations
 

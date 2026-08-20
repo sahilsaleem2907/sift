@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """PR-internal import graph: detect when changed files are imported by other files in the same PR."""
 import logging
 from dataclasses import dataclass

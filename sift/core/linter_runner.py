@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Run language-specific linters on file contents; return unified issues by path. Used for diff-only context."""
 import json
 import logging

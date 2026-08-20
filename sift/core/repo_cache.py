@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Git clone cache: first PR clones, subsequent PRs fetch + checkout. Used for CodeQL."""
 import logging
 import subprocess

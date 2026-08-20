@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """PR diff extraction for review."""
 import logging
 import re

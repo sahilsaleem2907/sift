@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Abstract base class for forge (SCM) providers."""
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
