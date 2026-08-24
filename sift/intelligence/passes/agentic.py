@@ -16,7 +16,11 @@ from sift.intelligence.effort import EffortPlan
 from sift.intelligence.llm_client import (
     REVIEW_FILE_SYSTEM,
     _annotate_diff_with_line_numbers,
+    _parse_review_file_response,
+    cache_control_block,
+    is_anthropic_direct,
 )
+from sift.observability.cost import record_response
 from sift.intelligence.prompts import TEST_FILE_APPENDIX
 from sift.intelligence.passes.candidates import generate_candidates
 from sift.intelligence.passes.pipeline import FileReviewInput
@@ -309,6 +313,7 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
                 await asyncio.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"agentic step failed: finish_reason={finish}")
+        record_response(config.LLM_MODEL, response)
         return response
     raise RuntimeError("agentic step failed: retries exhausted")
 
@@ -321,6 +326,7 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
         "timeout": 120.0,
     }
     response = await acompletion(**kwargs)
+    record_response(config.LLM_MODEL, response)
     return (response.choices[0].message.content or "").strip()
 
 
@@ -374,10 +380,23 @@ async def agentic_review(
     system_prompt = REVIEW_FILE_SYSTEM
     if pr_context.get("is_test"):
         system_prompt = REVIEW_FILE_SYSTEM + TEST_FILE_APPENDIX
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
+    # Cache the stable prefix (system + the initial file/diff/context user turn) so the
+    # remaining tool-loop steps resend it at ~0.1x instead of full price — the dominant cost
+    # of the high-effort primary pass. The system prompt alone is below Opus's 4096-token
+    # cache minimum, so the breakpoint that matters is on the (large) initial user turn; it
+    # caches everything before it. 5m TTL: this context is unique per file, reused only within
+    # this loop, so the cheaper 5m write beats a 1h write. Non-Anthropic providers get plain
+    # strings (unchanged).
+    if is_anthropic_direct(config.LLM_MODEL):
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": cache_control_block(system_prompt, "1h")},
+            {"role": "user", "content": cache_control_block(user_content, "5m")},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
 
     max_steps = config.SIFT_AGENTIC_MAX_STEPS
 
@@ -391,7 +410,7 @@ async def agentic_review(
             tool_calls = msg_dict.get("tool_calls") or []
             if not tool_calls:
                 content = msg_dict.get("content") or ""
-                return await _findings_from_raw(content, path)
+                return _findings_from_raw(content, path)
 
             for tc in tool_calls:
                 fn = tc.get("function") or {}
@@ -419,7 +438,7 @@ async def agentic_review(
             }
         )
         final = await _call_llm_final(messages)
-        return await _findings_from_raw(final, path)
+        return _findings_from_raw(final, path)
 
     except Exception as e:
         logger.warning(

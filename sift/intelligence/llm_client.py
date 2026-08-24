@@ -15,8 +15,62 @@ litellm.suppress_debug_info = True
 from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, TEST_FILE_APPENDIX
+from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
+
+
+def is_anthropic_direct(model: str) -> bool:
+    """True for direct Anthropic model ids that route through LiteLLM's Anthropic provider,
+    where cache_control content blocks are honored. Excludes 'openrouter/anthropic/...'
+    (that routes via OpenRouter / the raw-httpx path, where we keep plain string messages)."""
+    m = (model or "").lower()
+    return m.startswith("anthropic/") or m.startswith("claude-")
+
+
+def cache_control_block(text: str, ttl: str) -> List[Dict[str, Any]]:
+    """A single text content block marked for ephemeral prompt caching (Anthropic)."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral", "ttl": ttl}}]
+
+
+def build_messages(
+    system: str,
+    user_content: str,
+    model: str,
+    *,
+    cache_user_prefix: Optional[str] = None,
+    system_ttl: str = "1h",
+    prefix_ttl: str = "1h",
+) -> List[Dict[str, Any]]:
+    """Build the LiteLLM messages list.
+
+    For direct Anthropic models, wrap the (stable) system prompt — and an optional shared
+    user prefix — in cache_control content blocks so repeated calls reuse the cached prefix.
+    A breakpoint on the user prefix block caches everything before it (system + prefix). The
+    text is byte-identical to the plain-string form, so model outputs are unchanged.
+
+    For every other provider, return plain string messages (unchanged behavior).
+    """
+    if not is_anthropic_direct(model):
+        content = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": cache_control_block(system, system_ttl)}
+    ]
+    if cache_user_prefix is None:
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": cache_control_block(cache_user_prefix, prefix_ttl)
+                + [{"type": "text", "text": user_content}],
+            }
+        )
+    return messages
 
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(
@@ -131,16 +185,25 @@ async def _call_llm(
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
     temperature: float = 0.0,
+    cache_user_prefix: Optional[str] = None,
 ) -> str:
-    """Call configured LLM provider; return assistant message content or empty string."""
+    """Call configured LLM provider; return assistant message content or empty string.
+
+    ``cache_user_prefix``: shared user-message text placed before ``user_content``. For direct
+    Anthropic models it becomes a cached content block (so repeated calls that share this prefix
+    reuse it); for other providers it is concatenated ahead of ``user_content`` (same text).
+    """
     resolved_base = api_base or config.LLM_API_BASE or None
     resolved_model = model or config.LLM_MODEL
     resolved_key = api_key or config.LLM_API_KEY or None
 
     # When both a custom base and key are provided, call the OpenAI-compatible endpoint
-    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth.
+    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth. This path
+    # keeps plain string messages (no Anthropic cache_control): it's for OpenRouter/Ollama/
+    # gateways, not direct Anthropic.
     if resolved_key and resolved_base:
         import asyncio as _asyncio
+        effective_user = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
         raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
         base = resolved_base.rstrip("/")
         if not base.endswith("/v1"):
@@ -150,7 +213,7 @@ async def _call_llm(
             "model": raw_model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": effective_user},
             ],
             "temperature": temperature,
         }
@@ -182,10 +245,9 @@ async def _call_llm(
 
     kwargs: Dict[str, Any] = {
         "model": resolved_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
+        "messages": build_messages(
+            system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
+        ),
         "api_base": resolved_base,
         "timeout": 120.0,
         "temperature": temperature,
@@ -203,6 +265,7 @@ async def _call_llm(
             logger.debug("acompletion error (%s), retrying in %ss", e, wait)
             await _asyncio.sleep(wait)
             continue
+        record_response(resolved_model, response)
         finish = getattr(response.choices[0], "finish_reason", None)
         content = response.choices[0].message.content or ""
         # LiteLLM maps upstream 'error' finish_reason to 'stop'; an empty body

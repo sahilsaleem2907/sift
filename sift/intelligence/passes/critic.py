@@ -9,9 +9,15 @@ from typing import Any, Optional
 from sift import config
 from sift.intelligence.capability import ModelCapability
 from sift.intelligence.effort import EffortPlan
-from sift.intelligence.llm_client import _call_llm, _extract_json_array
+from sift.intelligence.llm_client import (
+    _call_llm,
+    _extract_json_array,
+    cache_control_block,
+    is_anthropic_direct,
+)
 from sift.intelligence.prompts import CRITIC_BATCHED_SYSTEM, CRITIC_FINDING_SYSTEM
 from sift.intelligence.schema import Certainty, Finding, Impact
+from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +211,9 @@ async def _acompletion_with_tools(messages: list[dict[str, Any]], llm_kw: dict[s
     }
     if llm_kw.get("api_key"):
         kwargs["api_key"] = llm_kw["api_key"]
-    return await acompletion(**kwargs)
+    resp = await acompletion(**kwargs)
+    record_response(llm_kw["model"], resp)
+    return resp
 
 
 async def _critique_with_tools(
@@ -215,11 +223,16 @@ async def _critique_with_tools(
     repo_root: str,
     path_to_content: dict[str, str],
     mod_funcs: dict[str, Any],
+    cache_prefix: Optional[str] = None,
 ) -> str:
     """Bounded tool-calling critic loop; returns the final raw model text.
 
     Symmetric with the agentic generator: the critic can call the same fact-tools to
     AFFIRMATIVELY verify a claim before dropping it (burden of proof on the drop).
+
+    ``cache_prefix``: shared user text (PR title + diff + verification context) reused across
+    every per-finding call on this file. For direct Anthropic review models it becomes a cached
+    block so those calls — and the steps within each call — reuse it at ~0.1x.
     """
     from sift.intelligence.passes.agentic import (
         _execute_tool,
@@ -227,10 +240,21 @@ async def _critique_with_tools(
         _parse_tool_arguments,
     )
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
-    ]
+    if cache_prefix is not None and is_anthropic_direct(llm_kw["model"]):
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": cache_control_block(system, "1h")},
+            {
+                "role": "user",
+                "content": cache_control_block(cache_prefix, "1h")
+                + [{"type": "text", "text": user_content}],
+            },
+        ]
+    else:
+        content = user_content if cache_prefix is None else f"{cache_prefix}{user_content}"
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
     for _ in range(_CRITIC_TOOL_MAX_STEPS):
         resp = await _acompletion_with_tools(messages, llm_kw)
         msg = resp.choices[0].message
@@ -261,6 +285,7 @@ async def _critique_with_tools(
         api_key=llm_kw.get("api_key") or None,
         timeout=120.0,
     )
+    record_response(llm_kw["model"], resp)
     return resp.choices[0].message.content or ""
 
 
@@ -445,8 +470,11 @@ async def critique_per_finding(
     for idx, f in enumerate(to_critique):
         if idx > 0 and config.SIFT_LLM_REQUEST_DELAY > 0:
             await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
-        user_content = (
-            f"PR title: {pr_title}\n\nDiff:\n{diff}{verify_ctx}\n\n"
+        # Shared prefix (PR title + diff + verification context) is identical for every finding
+        # on this file — cache it so the per-finding calls reuse it. The finding-specific part
+        # is the volatile suffix.
+        shared_prefix = f"PR title: {pr_title}\n\nDiff:\n{diff}{verify_ctx}\n\n"
+        finding_part = (
             f"Proposed finding:\n"
             f"line={f.line} impact={f.impact.value} certainty={f.certainty.value} "
             f"category={f.category} origin={f.origin}\n"
@@ -456,14 +484,19 @@ async def critique_per_finding(
         if use_tools and repo_root:
             try:
                 raw = await _critique_with_tools(
-                    CRITIC_FINDING_SYSTEM, user_content, llm_kw,
+                    CRITIC_FINDING_SYSTEM, finding_part, llm_kw,
                     repo_root, path_to_content, mod_funcs,
+                    cache_prefix=shared_prefix,
                 )
             except Exception as e:
                 logger.warning("[critic] tool loop failed (%s); plain critic fallback", e)
-                raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
+                raw = await _call_llm(
+                    CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix, **llm_kw
+                )
         else:
-            raw = await _call_llm(CRITIC_FINDING_SYSTEM, user_content, **llm_kw)
+            raw = await _call_llm(
+                CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix, **llm_kw
+            )
         v = _extract_json_object(raw)
         if v is None:
             kept.append(f)

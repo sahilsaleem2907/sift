@@ -109,7 +109,10 @@ async def test_per_finding_threads_verification_context_into_prompt():
     captured = {}
 
     async def _fake(system, user_content, **kw):
-        captured["user"] = user_content
+        # The shared PR/diff/verification prefix now arrives via cache_user_prefix (cached for
+        # direct Anthropic; concatenated ahead of user_content otherwise). Capture the effective
+        # text the model receives — the prefix plus the finding-specific suffix.
+        captured["user"] = f"{kw.get('cache_user_prefix') or ''}{user_content}"
         return '{"verdict": "keep", "impact": "high", "certainty": "likely", "reason": "ok"}'
 
     pr_context = {

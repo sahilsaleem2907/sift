@@ -24,6 +24,7 @@ from sift.core.analysis_routing import (
 )
 from sift.core.analyzers import run_analyzers
 from sift.core.footguns import detect_footguns, format_footgun_notes
+from sift.observability.cost import track_review
 from sift.core.pyright_runner import run_pyright
 from sift.core.version_detect import CANDIDATE_FILES, detect_targets, target_for_path
 from sift.intelligence.ast.diff_ast import build_diff_ast, get_new_file_plus_line_ranges
@@ -176,6 +177,22 @@ def _merge_comments_by_line(collected: List[Dict[str, Any]]) -> List[Dict[str, A
 
 
 async def run_review(
+    forge_builder: Callable[[], ForgeProvider],
+    owner: str,
+    repo: str,
+    pr_number: int,
+    before_sha: Optional[str] = None,
+) -> Optional[List[Finding]]:
+    """Scope per-review token/cost capture (no-op unless SIFT_COST_TRACKING), then run the review.
+
+    On exit this emits one greppable `[cost] review <owner>/<repo> pr=<n> ...` log line — the
+    benchmark scripts pick it up from the server log after each fork completes.
+    """
+    with track_review(f"{owner}/{repo} pr={pr_number}"):
+        return await _run_review_impl(forge_builder, owner, repo, pr_number, before_sha)
+
+
+async def _run_review_impl(
     forge_builder: Callable[[], ForgeProvider],
     owner: str,
     repo: str,

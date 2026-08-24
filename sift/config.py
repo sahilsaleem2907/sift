@@ -125,6 +125,12 @@ SIFT_REVIEW_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_REVIEW_CAPABILITY_OVERRI
 # Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
 SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")
 
+# Per-review token/cost capture (opt-in; see sift/observability/cost.py). Off by default —
+# enable on the benchmark to get a greppable per-review [cost] summary line (tokens per model,
+# cache read/write, USD). No effect on model outputs.
+_COST_TRACKING_RAW = (os.environ.get("SIFT_COST_TRACKING") or "0").strip().lower()
+SIFT_COST_TRACKING = _COST_TRACKING_RAW in ("1", "true", "yes")
+
 # Per-file reviewer: render the whole file as context when it is at or under this
 # many lines; above it, fall back to rendering only the changed line ranges.
 # Whole-file context lets the model verify cross-references (e.g. that an import is
