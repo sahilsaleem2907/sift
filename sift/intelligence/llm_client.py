@@ -156,7 +156,7 @@ async def _call_llm(
         }
         headers = {"Authorization": f"Bearer {resolved_key}"}
         for attempt in range(5):
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
                 resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code == 429:
                 wait = 2 ** attempt
@@ -174,7 +174,7 @@ async def _call_llm(
             {"role": "user", "content": user_content},
         ],
         "api_base": resolved_base,
-        "timeout": 120.0,
+        "timeout": config.LLM_TIMEOUT,
         "temperature": temperature,
     }
     response = await acompletion(**kwargs)

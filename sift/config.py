@@ -41,6 +41,7 @@ CODEQL_SUITE_RAW = (os.environ.get("CODEQL_SUITE") or "default").strip().lower()
 _VALID_SUITES = ("default", "security-extended", "security-and-quality")
 CODEQL_SUITE = CODEQL_SUITE_RAW if CODEQL_SUITE_RAW in _VALID_SUITES else "default"
 CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or "300")
 # Base directory for cached git clones (default: ~/.sift/clones or temp)
 _sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
 if _sift_clones:
