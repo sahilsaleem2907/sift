@@ -132,5 +132,3 @@ Sift is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AG
 
 - **Self-hosting with your own key is free, forever.** Running Sift internally — including as a service inside your org — carries no obligations.
 - **If you modify Sift and offer it to others over a network**, you must make your modified source available to those users under the same license. This keeps every improvement to Sift open, so no one can take it closed.
-
-Versions released before this change remain available under their original MIT terms; all releases going forward are AGPL-3.0.
