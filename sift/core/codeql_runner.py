@@ -5,7 +5,9 @@ import logging
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
+
+from sift import config
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,76 @@ def languages_from_paths(paths: List[str]) -> List[str]:
             seen.add(lang)
             out.append(lang)
     return out
+
+
+# Languages whose CodeQL extractor supports build-mode=none (source-only extraction,
+# no build required). Compiled languages default to autobuild, which fails here without
+# a build toolchain (no mvn/gradle). Go/C++/Swift do NOT support none — do not send it.
+_BUILD_MODE_NONE_LANGS = frozenset({"java", "csharp", "javascript", "python", "ruby"})
+# Languages that default to autobuild (so they actually need the none override to extract).
+_NEEDS_BUILD_MODE_NONE = frozenset({"java", "csharp"})
+
+# CODEQL_SUITE value -> the suite-file suffix inside each language's query pack.
+_SUITE_SUFFIX = {
+    "security-extended": "security-extended",
+    "security-and-quality": "security-and-quality",
+    "default": "code-scanning",
+}
+
+
+def _should_use_build_mode_none(languages: List[str]) -> bool:
+    """True when we should pass --build-mode=none for this language set.
+
+    Only when at least one language actually needs it (java/csharp) AND every
+    language supports it (so a single --build-mode flag is valid for the whole
+    DB / cluster). A go/cpp/swift in the mix means we omit it and fall back to
+    the CLI default (autobuild) rather than erroring the create.
+    """
+    if not any(lang in _NEEDS_BUILD_MODE_NONE for lang in languages):
+        return False
+    return all(lang in _BUILD_MODE_NONE_LANGS for lang in languages)
+
+
+def _build_create_cmd(db_path: Path, languages: List[str], source_root: Path) -> List[str]:
+    """Build the `codeql database create` command for one or more languages."""
+    cmd = ["codeql", "database", "create", str(db_path)]
+    if len(languages) == 1:
+        cmd += ["--language", languages[0]]
+    else:
+        cmd.append("--db-cluster")
+        for lang in languages:
+            cmd += ["--language", lang]
+    if _should_use_build_mode_none(languages):
+        cmd.append("--build-mode=none")
+    cmd.append(f"--source-root={source_root}")
+    return cmd
+
+
+def _build_analyze_cmd(
+    db_dir: Path,
+    lang: str,
+    suite: str,
+    out_sarif: Path,
+    packages_dir: Optional[str],
+) -> List[str]:
+    """Build the `codeql database analyze` command for a single-language DB.
+
+    Uses the language-qualified suite path (bare names like `security-extended` are
+    NOT resolvable) and points --additional-packs at the local pack cache, since the
+    packs are not on the CLI's default resolve path. Never uses --download.
+    """
+    cmd = [
+        "codeql", "database", "analyze",
+        str(db_dir),
+        "--format=sarif-latest",
+        f"--output={out_sarif}",
+        "--threads=0",
+    ]
+    if packages_dir and Path(packages_dir).is_dir():
+        cmd += ["--additional-packs", packages_dir]
+    suffix = _SUITE_SUFFIX.get(suite, _SUITE_SUFFIX["default"])
+    cmd.append(f"codeql/{lang}-queries:codeql-suites/{lang}-{suffix}.qls")
+    return cmd
 
 
 def _parse_sarif(sarif_path: Path, source_root: Path) -> Dict[str, List[dict]]:
@@ -137,26 +209,12 @@ def run_codeql(
         logger.debug("CodeQL not found in PATH; skipping CodeQL")
         return {}
 
+    packages_dir = getattr(config, "CODEQL_PACKAGES_DIR", None)
+
     with tempfile.TemporaryDirectory(prefix="sift_codeql_db_") as db_parent:
         db_path = Path(db_parent) / "db"
         # Single-language: one DB. Multi-language: db-cluster (multiple subdirs).
-        if len(languages) == 1:
-            lang = languages[0]
-            create_cmd = [
-                "codeql", "database", "create",
-                str(db_path),
-                "--language", lang,
-                f"--source-root={source_root}",
-            ]
-        else:
-            create_cmd = [
-                "codeql", "database", "create",
-                str(db_path),
-                "--db-cluster",
-                f"--source-root={source_root}",
-            ]
-            for lang in languages:
-                create_cmd.extend(["--language", lang])
+        create_cmd = _build_create_cmd(db_path, languages, source_root)
 
         try:
             create_result = subprocess.run(
@@ -179,30 +237,21 @@ def run_codeql(
             logger.warning("CodeQL database create timed out")
             return {}
 
-        # Analyze: run queries. For db-cluster, we have db/python, db/javascript, etc.
+        # Analyze: run queries per language. Single-language DB lives at db_path
+        # itself (its dir name is "db", not the language); db-cluster has db/java,
+        # db/javascript, etc. Thread the language through so the suite path is
+        # language-qualified.
         if len(languages) == 1:
-            analyze_dirs = [db_path]
+            lang_dirs = [(languages[0], db_path)]
         else:
-            analyze_dirs = [db_path / lang for lang in languages if (db_path / lang).exists()]
+            lang_dirs = [(lang, db_path / lang) for lang in languages if (db_path / lang).exists()]
 
         all_by_path: Dict[str, List[dict]] = {}
-        for adir in analyze_dirs:
+        for lang, adir in lang_dirs:
             if not adir.exists():
                 continue
-            out_sarif = Path(db_parent) / f"out_{adir.name}.sarif"
-            # Suite: default = no extra arg (use pack default). security-extended / security-and-quality = pass suite.
-            analyze_cmd = [
-                "codeql", "database", "analyze",
-                str(adir),
-                "--format=sarif-latest",
-                f"--output={out_sarif}",
-                "--threads=0",
-            ]
-            if suite == "security-extended":
-                analyze_cmd.append("security-extended")
-            elif suite == "security-and-quality":
-                analyze_cmd.append("security-and-quality")
-            # else default: no query arg uses pack default
+            out_sarif = Path(db_parent) / f"out_{lang}.sarif"
+            analyze_cmd = _build_analyze_cmd(adir, lang, suite, out_sarif, packages_dir)
 
             try:
                 analyze_result = subprocess.run(
@@ -216,12 +265,12 @@ def run_codeql(
                 if analyze_result.returncode != 0:
                     logger.warning(
                         "CodeQL analyze failed for %s: %s",
-                        adir.name,
+                        lang,
                         analyze_result.stderr or analyze_result.stdout,
                     )
                     continue
             except subprocess.TimeoutExpired:
-                logger.warning("CodeQL database analyze timed out for %s", adir.name)
+                logger.warning("CodeQL database analyze timed out for %s", lang)
                 continue
 
             if out_sarif.exists():

@@ -41,6 +41,9 @@ CODEQL_SUITE_RAW = (os.environ.get("CODEQL_SUITE") or "default").strip().lower()
 _VALID_SUITES = ("default", "security-extended", "security-and-quality")
 CODEQL_SUITE = CODEQL_SUITE_RAW if CODEQL_SUITE_RAW in _VALID_SUITES else "default"
 CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
+# Local CodeQL query-pack cache. The bundled packs (codeql/<lang>-queries) live here but
+# are not always on the CLI's default resolve path, so analyze passes --additional-packs.
+CODEQL_PACKAGES_DIR = os.environ.get("CODEQL_PACKAGES_DIR") or os.path.expanduser("~/.codeql/packages")
 
 # Pyright type-checker (optional; default disabled). Deterministic API/version-existence
 # findings, promoted critic-exempt. Runs against the full clone (like CodeQL).
