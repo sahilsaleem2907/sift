@@ -539,9 +539,15 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
             "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
             path, len(arr), len(out), skipped,
         )
-        if out:
-            return out
-        logger.debug("JSON array empty or invalid items for %s", path)
+        # A successful JSON parse is authoritative: return it directly even when
+        # empty (no findings, or all items filtered as low-confidence). Only fall
+        # through to the tab/line-ref fallbacks when NO JSON array was extractable
+        # at all (arr is None) — the case those fallbacks were designed for.
+        return out
+
+    # The fallbacks scan the reasoning-stripped text so a "<reasoning>…on line 42…"
+    # sentence can never be mistaken for a finding (fabrication hazard).
+    text = _strip_thinking_blocks(text)
 
     # Fallback 1: tab-separated format "[L<n>]\t<severity>\t<title>\t<body>"
     # Some models (e.g. qwen3-coder-next) emit this instead of JSON.

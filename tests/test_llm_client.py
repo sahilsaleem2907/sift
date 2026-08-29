@@ -6,6 +6,8 @@ Regression coverage for the parser bug that shipped silently through PRs
 in that prose (e.g. "[L10]") defeated the old first-bracket-to-last-bracket
 parser, producing zero findings with no visible error.
 """
+import logging
+
 import pytest
 
 from sift.intelligence.llm_client import (
@@ -138,6 +140,32 @@ def test_parse_review_full_seam_pr238():
 
 def test_parse_review_genuinely_empty_returns_empty():
     assert _parse_review_file_response("<reasoning>looks fine</reasoning>\n[]", "f.ts") == []
+
+
+def test_parse_review_empty_array_logs_no_parse_failure(caplog):
+    """A valid [] after a reasoning block is a genuine empty result, not a failure.
+
+    Regression for the cal.com run: a closed <reasoning> block followed by [] was
+    returning [] correctly but still logging a false 'Review parse FAILURE' (and
+    inflating the harness health counter). The reasoning here also contains an
+    'on line 42' phrase to prove the empty array short-circuits before the
+    line-ref fallback can fabricate a finding from prose.
+    """
+    raw = "<reasoning>looks fine, though on line 42 something\n</reasoning>\n[]"
+    with caplog.at_level(logging.WARNING, logger="sift.intelligence.llm_client"):
+        out = _parse_review_file_response(raw, "f.ts")
+    assert out == []
+    assert "parse FAILURE" not in caplog.text
+
+
+def test_parse_review_reasoning_prose_does_not_fabricate_finding():
+    """Reasoning-only output (no JSON array) must not yield a fabricated finding.
+
+    The line-ref fallback runs on reasoning-stripped text, so an 'On line 42 …'
+    sentence inside <reasoning> can never be mistaken for a Line-N finding.
+    """
+    raw = "<reasoning>\nOn line 42 the loop looks wrong but is actually fine.\n</reasoning>"
+    assert _parse_review_file_response(raw, "f.py") == []
 
 
 # ---- unclosed <reasoning> (truncated / never-emitted-array output) ----

@@ -185,8 +185,8 @@ SLICE=$(tail -c +$((RUN_START+1)) "$LOG" 2>/dev/null)
 echo
 echo "--- run health (over this run's log slice) ---"
 echo "  parse FAILURE count (want 0; nonzero => broken tool loop): $(grep -c 'parse FAILURE' <<<"$SLICE")"
-auth_hits=$(grep -icE '401|invalid_api_key|unauthorized' <<<"$SLICE")
-echo "  auth errors (401/invalid_api_key/unauthorized): $auth_hits"
+auth_hits=$(grep -icE 'HTTP/[0-9.]+ 401|"status":[[:space:]]*401|AuthenticationError|invalid_api_key|401 Unauthorized|Invalid API [Kk]ey' <<<"$SLICE")
+echo "  auth errors (real 401/invalid_api_key): $auth_hits"
 grep -qiE 'auto-promot.*codeql|codeql.*finding|\[static_promote\].*codeql|Running CodeQL' <<<"$SLICE" \
   && echo "  CodeQL: fired ✓" || echo "  CodeQL: no lines (Skipping/absent)"
 grep -qE '\[Vector\]' <<<"$SLICE" \
