@@ -82,7 +82,10 @@ async def generate_candidates(
     file_diff: str,
     path: str,
     pr_context: Optional[dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> list[Finding]:
     """Call the LLM for a single file and return findings as Finding objects."""
-    raw_comments = await llm_client.review_file(file_diff, path, pr_context)
+    raw_comments = await llm_client.review_file(
+        file_diff, path, pr_context, reasoning_effort=reasoning_effort
+    )
     return [finding_from_comment(c, path) for c in raw_comments]

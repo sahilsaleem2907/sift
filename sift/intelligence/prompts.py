@@ -82,6 +82,25 @@ Rules:
 - Return [] if there is nothing significant to report.
 """
 
+# For extended-thinking models (reasoning_effort set): the model reasons via the hidden
+# thinking block — asking for a visible <reasoning> block wastes the constrained
+# post-thinking output budget and causes JSON truncation parse failures.
+_VISIBLE_REASONING_PREAMBLE = (
+    "Before outputting JSON, wrap a brief analysis in <reasoning>...</reasoning>:\n"
+    "(1) What semantically changed (2) Which call sites or error paths may be affected.\n"
+    "Then output the JSON array after the reasoning block.\n\n"
+    "The JSON array is REQUIRED and is the only part of your response that is used. "
+    "A response that ends after the reasoning block, or contains reasoning without a "
+    "following JSON array, is invalid. Always emit the array — use [] if there is "
+    "nothing to report. Keep the reasoning brief so you never run out of room for the array.\n\n"
+    "Respond with a JSON array only after the reasoning block."
+)
+REVIEW_FILE_SYSTEM_EXTENDED_THINKING = REVIEW_FILE_SYSTEM.replace(
+    _VISIBLE_REASONING_PREAMBLE,
+    "The JSON array is REQUIRED. Always emit the array — use [] if there is nothing to report.\n\n"
+    "Respond with a JSON array only.",
+)
+
 TEST_FILE_APPENDIX = """This file is a test, fixture, or mock. Review it through a test lens, NOT a production-security lens:
 - Intentional insecurity is EXPECTED and correct here. Do NOT flag as security/vulnerability: hardcoded fixture credentials, mock/fake secrets, tokens or API keys that are obviously test values (e.g. "AKIAFAKE...", "sk-test-...", "password123"), SQL-injection / XSS / path-traversal strings used as test INPUTS, eval/exec/deserialization of controlled test data, or weak crypto (md5, DES) used to exercise a code path. These are the point of the test.
 - Focus ONLY on test-logic correctness: assertions that can never fail (assert True, assertTrue(True)), tests that assert nothing, wrong expected values, a test that exercises the wrong thing or has an inverted condition, incorrect mock/stub/patch setup (patching the wrong target, a mock that never gets asserted), resource leaks in setup/teardown, and nondeterministic/flaky constructs (real time, network, ordering assumptions).

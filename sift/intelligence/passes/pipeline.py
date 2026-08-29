@@ -89,7 +89,11 @@ async def run_pipeline_per_file(
             repo_root=(pr_meta.repo_root if pr_meta else None),
         )
     else:
-        candidates = await generate_candidates(file.file_diff, file.path, enriched)
+        # Request reasoning on the primary generator only when the model supports it.
+        reasoning_effort = plan.reasoning_effort if cap.supports_reasoning else None
+        candidates = await generate_candidates(
+            file.file_diff, file.path, enriched, reasoning_effort=reasoning_effort
+        )
     logger.debug("[pipeline] %s: %d candidate(s) + %d promoted", file.path, len(candidates), len(promoted))
 
     # Merge promoted static findings in before the critic so rule_dedupe can

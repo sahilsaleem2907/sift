@@ -14,7 +14,7 @@ litellm.suppress_debug_info = True
 
 from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
-from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, TEST_FILE_APPENDIX
+from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, REVIEW_FILE_SYSTEM_EXTENDED_THINKING, TEST_FILE_APPENDIX
 from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
@@ -186,12 +186,18 @@ async def _call_llm(
     api_key: Optional[str] = None,
     temperature: float = 0.0,
     cache_user_prefix: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Call configured LLM provider; return assistant message content or empty string.
 
     ``cache_user_prefix``: shared user-message text placed before ``user_content``. For direct
     Anthropic models it becomes a cached content block (so repeated calls that share this prefix
     reuse it); for other providers it is concatenated ahead of ``user_content`` (same text).
+
+    ``reasoning_effort``: when set (e.g. "low"/"high"), request model reasoning on the LiteLLM
+    path. Anthropic rejects temperature != 1 with thinking enabled and needs headroom above the
+    thinking budget, so we force temperature=1 and a larger max_tokens on those calls. Only the
+    LiteLLM path honours it; the OpenAI-compatible gateway branch below ignores it.
     """
     resolved_base = api_base or config.LLM_API_BASE or None
     resolved_model = model or config.LLM_MODEL
@@ -252,6 +258,13 @@ async def _call_llm(
         "timeout": 120.0,
         "temperature": temperature,
     }
+    if reasoning_effort:
+        # Anthropic requires temperature=1 with thinking, and max_tokens must exceed the
+        # thinking budget (4096 for "high"). 16000 gives ~12k for text output after the
+        # thinking budget — 8192 was too tight when the model also wrote visible reasoning.
+        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["temperature"] = 1.0
+        kwargs["max_tokens"] = 16000
     import asyncio as _asyncio
     last_exc: Optional[Exception] = None
     for attempt in range(3):
@@ -447,11 +460,11 @@ def _balanced_array_end(text: str, start: int) -> int:
 def _extract_json_array(raw: str) -> Optional[List[Any]]:
     """Extract a JSON array from raw LLM output.
 
-    Robust against reasoning models: first strips <think>/<thinking>/<reasoning>
+    Robust against reasoning models: strips closed <think>/<thinking>/<reasoning>
     blocks, then tries each '[' as a candidate start and returns the first
-    balanced slice that parses as a JSON *list*. This survives prose that
-    contains stray brackets (e.g. "[L10]" line references), markdown fences, and
-    leading commentary before the real array.
+    balanced slice that parses as a JSON *list*. If stripping leaves nothing
+    useful (e.g. the model embedded JSON inside an unclosed reasoning block),
+    falls back to scanning the original raw text so the JSON is still found.
 
     Returns None when no list can be extracted. Callers should WARNING-log when
     the raw input was non-empty but this returns None — that signals a parse
@@ -835,6 +848,7 @@ async def review_file(
     diff_chunk: str,
     path: str,
     pr_context: Optional[Dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Review a single file's diff; return list of {line, body} for inline comments.
 
@@ -956,14 +970,15 @@ async def review_file(
         logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
-    system_prompt = REVIEW_FILE_SYSTEM
-    if (pr_context or {}).get("is_test"):
-        system_prompt = REVIEW_FILE_SYSTEM + TEST_FILE_APPENDIX
-    raw = await _call_llm(system_prompt, user_content)
+    _base = REVIEW_FILE_SYSTEM_EXTENDED_THINKING if reasoning_effort else REVIEW_FILE_SYSTEM
+    system_prompt = _base + (TEST_FILE_APPENDIX if (pr_context or {}).get("is_test") else "")
+    raw = await _call_llm(system_prompt, user_content, reasoning_effort=reasoning_effort)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
 
     async def _recall(repair_prompt: str) -> str:
-        return await _call_llm(REVIEW_FILE_SYSTEM, repair_prompt)
+        return await _call_llm(
+            REVIEW_FILE_SYSTEM, repair_prompt, reasoning_effort=reasoning_effort
+        )
 
     return await parse_with_repair(raw, path, _recall)
 

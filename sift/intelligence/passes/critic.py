@@ -197,7 +197,11 @@ def _critic_llm_kwargs() -> dict[str, Any]:
 _CRITIC_TOOL_MAX_STEPS = 3
 
 
-async def _acompletion_with_tools(messages: list[dict[str, Any]], llm_kw: dict[str, Any]) -> Any:
+async def _acompletion_with_tools(
+    messages: list[dict[str, Any]],
+    llm_kw: dict[str, Any],
+    reasoning_effort: Optional[str] = None,
+) -> Any:
     from litellm import acompletion
     from sift.intelligence.passes.agentic import TOOLS
 
@@ -211,6 +215,11 @@ async def _acompletion_with_tools(messages: list[dict[str, Any]], llm_kw: dict[s
     }
     if llm_kw.get("api_key"):
         kwargs["api_key"] = llm_kw["api_key"]
+    if reasoning_effort:
+        # No temperature is set here, so Anthropic's default (1.0) already satisfies the
+        # thinking constraint; max_tokens must exceed the thinking budget (4096 for "high").
+        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["max_tokens"] = 8192
     resp = await acompletion(**kwargs)
     record_response(llm_kw["model"], resp)
     return resp
@@ -224,6 +233,7 @@ async def _critique_with_tools(
     path_to_content: dict[str, str],
     mod_funcs: dict[str, Any],
     cache_prefix: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Bounded tool-calling critic loop; returns the final raw model text.
 
@@ -256,7 +266,7 @@ async def _critique_with_tools(
             {"role": "user", "content": content},
         ]
     for _ in range(_CRITIC_TOOL_MAX_STEPS):
-        resp = await _acompletion_with_tools(messages, llm_kw)
+        resp = await _acompletion_with_tools(messages, llm_kw, reasoning_effort=reasoning_effort)
         msg = resp.choices[0].message
         md = _message_to_dict(msg)
         messages.append(md)
@@ -278,13 +288,17 @@ async def _critique_with_tools(
         "role": "user",
         "content": "Step limit reached. Respond with your final JSON verdict object only (no tool calls).",
     })
-    resp = await acompletion(
+    final_kwargs: dict[str, Any] = dict(
         model=llm_kw["model"],
         messages=messages,
         api_base=llm_kw.get("api_base"),
         api_key=llm_kw.get("api_key") or None,
         timeout=120.0,
     )
+    if reasoning_effort:
+        final_kwargs["reasoning_effort"] = reasoning_effort
+        final_kwargs["max_tokens"] = 8192
+    resp = await acompletion(**final_kwargs)
     record_response(llm_kw["model"], resp)
     return resp.choices[0].message.content or ""
 
@@ -335,6 +349,7 @@ async def critique_batched(
     pr_title: str,
     cap: ModelCapability,
     pr_context: Optional[dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> list[Finding]:
     """One LLM call per file with all candidates."""
     _ = cap
@@ -359,7 +374,10 @@ async def critique_batched(
         f"{_verification_context(pr_context)}\n\nProposed findings:\n{items}"
     )
 
-    raw = await _call_llm(CRITIC_BATCHED_SYSTEM, user_content, **_critic_llm_kwargs())
+    raw = await _call_llm(
+        CRITIC_BATCHED_SYSTEM, user_content, reasoning_effort=reasoning_effort,
+        **_critic_llm_kwargs(),
+    )
     verdicts = _extract_json_array(raw) or []
     verdict_map: dict[int, dict] = {}
     for v in verdicts:
@@ -445,6 +463,7 @@ async def critique_per_finding(
     pr_title: str,
     cap: ModelCapability,
     pr_context: Optional[dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> list[Finding]:
     """One LLM call per finding (high effort)."""
     _ = cap
@@ -487,15 +506,18 @@ async def critique_per_finding(
                     CRITIC_FINDING_SYSTEM, finding_part, llm_kw,
                     repo_root, path_to_content, mod_funcs,
                     cache_prefix=shared_prefix,
+                    reasoning_effort=reasoning_effort,
                 )
             except Exception as e:
                 logger.warning("[critic] tool loop failed (%s); plain critic fallback", e)
                 raw = await _call_llm(
-                    CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix, **llm_kw
+                    CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix,
+                    reasoning_effort=reasoning_effort, **llm_kw
                 )
         else:
             raw = await _call_llm(
-                CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix, **llm_kw
+                CRITIC_FINDING_SYSTEM, finding_part, cache_user_prefix=shared_prefix,
+                reasoning_effort=reasoning_effort, **llm_kw
             )
         v = _extract_json_object(raw)
         if v is None:
@@ -532,6 +554,17 @@ async def critique(
     pr_context: Optional[dict[str, Any]] = None,
 ) -> list[Finding]:
     """Run critic pass at the granularity defined by the effort plan."""
+    # Request reasoning on critic calls only when the *review* model supports it — the critic
+    # calls SIFT_REVIEW_MODEL (falling back to primary), whose capability may differ from `cap`.
+    from sift.intelligence.capability import review_capability
+
+    reasoning_effort = (
+        plan.reasoning_effort if review_capability().supports_reasoning else None
+    )
     if plan.critic_per_finding:
-        return await critique_per_finding(findings, diff, pr_title, cap, pr_context)
-    return await critique_batched(findings, diff, pr_title, cap, pr_context)
+        return await critique_per_finding(
+            findings, diff, pr_title, cap, pr_context, reasoning_effort=reasoning_effort
+        )
+    return await critique_batched(
+        findings, diff, pr_title, cap, pr_context, reasoning_effort=reasoning_effort
+    )

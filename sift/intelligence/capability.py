@@ -27,6 +27,8 @@ _REASONING_MODEL_SUBSTRINGS = (
     "reasoning",
     "r1",
     "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-haiku-4",
     "claude-3-7",
 )
 
