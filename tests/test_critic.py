@@ -1,11 +1,13 @@
 """Tests for sift.intelligence.passes.critic."""
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from sift.intelligence.capability import ModelCapability
 from sift.intelligence.passes.critic import (
+    _CRITIC_TOOL_MAX_STEPS,
     _clamp_certainty_for_critic,
+    _critique_with_tools,
     _verification_context,
     critique,
     critique_batched,
@@ -153,6 +155,59 @@ async def test_per_finding_security_never_dropped():
             [_finding(category="security")], "diff", "title", cap, {"runtime_target": "Python 3.13"},
         )
     assert len(kept) == 1
+@pytest.mark.asyncio
+async def test_critic_final_call_keeps_tools_and_disables_tool_choice(monkeypatch):
+    """When the critic's tool loop exhausts its step budget, the post-limit final verdict call
+    must still declare tools= (the history carries tool_calls, rejected by direct Anthropic
+    without it) and set tool_choice='none'. Regression for the martian-benchmark
+    UnsupportedParamsError that forced the plain-critic fallback. The critic imports acompletion
+    locally from litellm, so we patch it at the source."""
+    import litellm
+
+    def _tool_msg():
+        tc = MagicMock()
+        tc.id = "tc1"
+        tc.function = MagicMock()
+        tc.function.name = "get_file"
+        tc.function.arguments = '{"path": "app/x.py"}'
+        m = MagicMock()
+        m.content = None
+        m.tool_calls = [tc]
+        m.role = "assistant"
+        return m
+
+    final_msg = MagicMock()
+    final_msg.content = '{"verdict": "keep", "reason": "ok"}'
+    final_msg.tool_calls = None
+    final_msg.role = "assistant"
+
+    calls: list[dict] = []
+
+    async def _record(**kwargs):
+        calls.append(kwargs)
+        resp = MagicMock()
+        # Keep requesting tools until the budget is spent, then answer with a verdict.
+        msg = _tool_msg() if len(calls) <= _CRITIC_TOOL_MAX_STEPS else final_msg
+        resp.choices = [MagicMock(message=msg)]
+        return resp
+
+    monkeypatch.setattr(litellm, "acompletion", _record)
+
+    out = await _critique_with_tools(
+        system="sys",
+        user_content="u",
+        llm_kw={"model": "anthropic/claude-sonnet-4-6", "api_base": None, "api_key": None},
+        repo_root="/tmp",
+        path_to_content={"app/x.py": "x = 1\n"},
+        mod_funcs={},
+    )
+
+    assert out == '{"verdict": "keep", "reason": "ok"}'   # final call succeeded, no fallback
+    final_kwargs = calls[-1]
+    assert final_kwargs.get("tools"), "final call must declare tools= for Anthropic tool history"
+    assert final_kwargs.get("tool_choice") == "none"
+
+
 def _speculative(category: str, impact: Impact = Impact.HIGH) -> Finding:
     f = _finding(impact=impact)
     return Finding(

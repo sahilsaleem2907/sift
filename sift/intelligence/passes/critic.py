@@ -245,6 +245,7 @@ async def _critique_with_tools(
     block so those calls — and the steps within each call — reuse it at ~0.1x.
     """
     from sift.intelligence.passes.agentic import (
+        TOOLS,
         _execute_tool,
         _message_to_dict,
         _parse_tool_arguments,
@@ -288,9 +289,14 @@ async def _critique_with_tools(
         "role": "user",
         "content": "Step limit reached. Respond with your final JSON verdict object only (no tool calls).",
     })
+    # messages still carries tool_calls/tool results, so tools= must stay declared (direct
+    # Anthropic rejects tool history without it). tool_choice="none" forces the final verdict
+    # as text now that the step budget is spent.
     final_kwargs: dict[str, Any] = dict(
         model=llm_kw["model"],
         messages=messages,
+        tools=TOOLS,
+        tool_choice="none",
         api_base=llm_kw.get("api_base"),
         api_key=llm_kw.get("api_key") or None,
         timeout=120.0,

@@ -119,6 +119,48 @@ async def test_agentic_respects_step_cap():
 
 
 @pytest.mark.asyncio
+async def test_agentic_final_call_keeps_tools_and_disables_tool_choice():
+    """When the step budget is exhausted, the post-limit final call must still declare tools=
+    (the message history carries tool_calls, which direct Anthropic rejects without tools=) and
+    set tool_choice='none' to force a text answer. Regression for the martian-benchmark
+    UnsupportedParamsError that made every exhausted loop fall back to a blind review."""
+    plan = plan_for(EffortLevel.HIGH)
+    cap = ModelCapability(128_000, 4096, True, False)
+    file_input = FileReviewInput(
+        path="app/a.py",
+        file_diff="diff --git a/app/a.py\n+++ b/app/a.py\n@@ -1 +1,2 @@\n+x\n",
+        pr_context={},
+    )
+    always_tool = _mock_message(
+        tool_calls=[_mock_tool_call("tc1", "get_file", '{"path": "app/a.py"}')]
+    )
+    final_msg = _mock_message(content="[]")
+
+    calls: list[dict] = []
+
+    async def _record(**kwargs):
+        calls.append(kwargs)
+        resp = MagicMock()
+        # Keep requesting tools until the budget is spent, then return the final text answer.
+        msg = always_tool if len(calls) <= config.SIFT_AGENTIC_MAX_STEPS else final_msg
+        resp.choices = [MagicMock(message=msg)]
+        return resp
+
+    old_max = config.SIFT_AGENTIC_MAX_STEPS
+    config.SIFT_AGENTIC_MAX_STEPS = 2
+    try:
+        with mock.patch("sift.intelligence.passes.agentic.acompletion", new=_record):
+            findings = await agentic_review(file_input, plan, cap, {"app/a.py": "x=1\n"})
+    finally:
+        config.SIFT_AGENTIC_MAX_STEPS = old_max
+
+    assert findings == []            # final call succeeded (no fallback), returned []
+    final_kwargs = calls[-1]
+    assert final_kwargs.get("tools"), "final call must declare tools= for Anthropic tool history"
+    assert final_kwargs.get("tool_choice") == "none"
+
+
+@pytest.mark.asyncio
 async def test_agentic_non_tool_model_falls_back_to_generate_candidates():
     plan = plan_for(EffortLevel.HIGH)
     cap = ModelCapability(8192, 2048, False, False)

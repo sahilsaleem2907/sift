@@ -319,9 +319,14 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
 
 
 async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
+    # messages still carries the loop's tool_calls/tool results, so tools= must stay declared
+    # (direct Anthropic rejects tool history without it). tool_choice="none" forces a text
+    # answer instead of another tool call now that the step budget is spent.
     kwargs: dict[str, Any] = {
         "model": config.LLM_MODEL,
         "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "none",
         "api_base": config.LLM_API_BASE or None,
         "timeout": 120.0,
     }
