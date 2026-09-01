@@ -487,6 +487,59 @@ def _extract_json_array(raw: str) -> Optional[List[Any]]:
         search_from = start + 1
 
 
+def _items_to_comments(arr: List[Any], path: str) -> List[Dict[str, Any]]:
+    """Convert a list of structured finding items into comment dicts.
+
+    Shared by the freeform review-file parser (after _extract_json_array) and the
+    deterministic forced-tool emit path (agentic), so both apply the identical
+    confidence>=5 filter, body formatting, and field mapping.
+    """
+    out: List[Dict[str, Any]] = []
+    skipped = 0
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_val = item.get("line")
+            line_int = int(line_val) if line_val is not None else None
+        except (TypeError, ValueError):
+            continue
+        if line_int is None or line_int <= 0:
+            continue
+        try:
+            confidence = int(item.get("confidence", 7))
+        except (TypeError, ValueError):
+            confidence = 7
+        logger.debug(
+            "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
+            path, line_int, item.get("severity"), item.get("title"), confidence,
+        )
+        if confidence < 5:
+            skipped += 1
+            logger.debug(
+                "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
+                confidence, path, line_int, item.get("title"),
+            )
+            continue
+        body = _format_structured_comment_body(item)
+        if body.strip():
+            out.append({
+                "line": line_int,
+                "body": body,
+                "post_inline": True,
+                "category": item.get("category"),
+                "severity": (item.get("severity") or "suggestion").lower(),
+                "title": (item.get("title") or "").strip(),
+                "confidence": confidence,
+                "fix": item.get("fix") or None,
+            })
+    logger.debug(
+        "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
+        path, len(arr), len(out), skipped,
+    )
+    return out
+
+
 def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     """Parse LLM response: prefer JSON array; fall back to freeform line-ref regex."""
     if not raw or not raw.strip():
@@ -496,54 +549,11 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     # Try structured JSON first
     arr = _extract_json_array(text)
     if arr is not None and isinstance(arr, list):
-        out: List[Dict[str, Any]] = []
-        skipped = 0
-        for item in arr:
-            if not isinstance(item, dict):
-                continue
-            try:
-                line_val = item.get("line")
-                line_int = int(line_val) if line_val is not None else None
-            except (TypeError, ValueError):
-                continue
-            if line_int is None or line_int <= 0:
-                continue
-            try:
-                confidence = int(item.get("confidence", 7))
-            except (TypeError, ValueError):
-                confidence = 7
-            logger.debug(
-                "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
-                path, line_int, item.get("severity"), item.get("title"), confidence,
-            )
-            if confidence < 5:
-                skipped += 1
-                logger.debug(
-                    "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
-                    confidence, path, line_int, item.get("title"),
-                )
-                continue
-            body = _format_structured_comment_body(item)
-            if body.strip():
-                out.append({
-                    "line": line_int,
-                    "body": body,
-                    "post_inline": True,
-                    "category": item.get("category"),
-                    "severity": (item.get("severity") or "suggestion").lower(),
-                    "title": (item.get("title") or "").strip(),
-                    "confidence": confidence,
-                    "fix": item.get("fix") or None,
-                })
-        logger.debug(
-            "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
-            path, len(arr), len(out), skipped,
-        )
         # A successful JSON parse is authoritative: return it directly even when
         # empty (no findings, or all items filtered as low-confidence). Only fall
         # through to the tab/line-ref fallbacks when NO JSON array was extractable
         # at all (arr is None) — the case those fallbacks were designed for.
-        return out
+        return _items_to_comments(arr, path)
 
     # The fallbacks scan the reasoning-stripped text so a "<reasoning>…on line 42…"
     # sentence can never be mistaken for a finding (fabrication hazard).

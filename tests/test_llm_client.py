@@ -14,6 +14,7 @@ from sift.intelligence.llm_client import (
     _balanced_array_end,
     _build_structured_summary,
     _extract_json_array,
+    _items_to_comments,
     _parse_review_file_response,
     _strip_thinking_blocks,
     parse_with_repair,
@@ -123,6 +124,21 @@ def test_extract_returns_none_on_empty():
 
 def test_extract_empty_array():
     assert _extract_json_array("<reasoning>nothing</reasoning>\n[]") == []
+
+
+# ---- shared conversion helper: _items_to_comments ----
+
+def test_items_to_comments_filters_low_confidence_and_formats():
+    items = [
+        {"line": 1, "severity": "bug", "title": "Real", "body": "boom", "confidence": 9},
+        {"line": 2, "severity": "nit", "title": "Weak", "body": "meh", "confidence": 3},
+        {"line": 0, "severity": "bug", "title": "Bad line", "body": "x", "confidence": 9},
+        {"line": 4, "severity": "bug", "title": "No conf defaults to 7", "body": "z"},
+    ]
+    out = _items_to_comments(items, "f.py")
+    lines = sorted(c["line"] for c in out)
+    assert lines == [1, 4]  # confidence<5 dropped; line<=0 dropped; missing confidence kept
+    assert all(c["body"].strip() for c in out)
 
 
 # ---- full seam: _parse_review_file_response ----

@@ -16,9 +16,13 @@ from sift.intelligence.effort import EffortPlan
 from sift.intelligence.llm_client import (
     REVIEW_FILE_SYSTEM,
     _annotate_diff_with_line_numbers,
+    _call_llm,
+    _extract_json_array,
+    _items_to_comments,
     _parse_review_file_response,
     cache_control_block,
     is_anthropic_direct,
+    parse_with_repair,
 )
 from sift.observability.cost import record_response
 from sift.intelligence.prompts import TEST_FILE_APPENDIX
@@ -174,6 +178,50 @@ TOOLS = [
         },
     },
 ]
+
+# Terminal tool for the deterministic final answer. Forcing tool_choice to this
+# tool makes the model return schema-constrained JSON in `arguments` instead of
+# free text, so the output is guaranteed parseable (no reasoning-tag stripping /
+# bracket scanning). Mirrors the freeform findings item schema exactly, so only
+# the transport changes — _items_to_comments applies the identical filtering.
+EMIT_FINDINGS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "emit_findings",
+        "description": (
+            "Submit the final review findings for this file as structured data. "
+            "Call this exactly once with all findings; output [] for findings if "
+            "there are no real issues."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "line": {
+                                "type": "integer",
+                                "description": "1-based line number from a [L<n>] marker in the diff",
+                            },
+                            "severity": {"type": "string"},
+                            "title": {"type": "string"},
+                            "body": {"type": "string"},
+                            "fix": {"type": "string"},
+                            "confidence": {
+                                "type": "integer",
+                                "description": "1-10; findings below 5 are dropped",
+                            },
+                        },
+                        "required": ["line", "severity", "title", "body", "confidence"],
+                    },
+                },
+            },
+            "required": ["findings"],
+        },
+    },
+}
 
 
 def _execute_tool(
@@ -335,11 +383,78 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def _findings_from_raw(raw: str, path: str) -> list[Finding]:
+async def _emit_findings_final(messages: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    """Force the model to submit findings via the emit_findings tool.
+
+    Deterministic: the response is schema-constrained JSON in the tool-call
+    arguments, so there is no free text to heuristically parse. Forcing a specific
+    tool is safe here only because the agentic loop sends no reasoning_effort —
+    Anthropic forbids a forced tool_choice under extended thinking. If reasoning is
+    ever enabled on this path, this call must be gated.
+    """
+    emit_messages = messages + [{
+        "role": "user",
+        "content": "Step limit reached. Submit your findings now by calling emit_findings.",
+    }]
+    kwargs: dict[str, Any] = {
+        "model": config.LLM_MODEL,
+        "messages": emit_messages,
+        # Prior read-tool calls remain in history, so their definitions must stay
+        # declared alongside emit_findings (direct-Anthropic requirement).
+        "tools": TOOLS + [EMIT_FINDINGS_TOOL],
+        "tool_choice": {"type": "function", "function": {"name": "emit_findings"}},
+        "api_base": config.LLM_API_BASE or None,
+        "timeout": 120.0,
+    }
+    response = await acompletion(**kwargs)
+    record_response(config.LLM_MODEL, response)
+    tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
+    for tc in tool_calls:
+        fn = getattr(tc, "function", None)
+        if fn and getattr(fn, "name", "") == "emit_findings":
+            args = _parse_tool_arguments(getattr(fn, "arguments", "{}"))
+            findings = args.get("findings")
+            if isinstance(findings, list):
+                return _items_to_comments(findings, path)
+            return []
+    # Forced tool_choice should guarantee the call; treat its absence as a failure
+    # so the caller falls through to the free-text repair path.
+    raise RuntimeError("emit_findings not returned despite forced tool_choice")
+
+
+async def _final_comments(
+    messages: list[dict[str, Any]], path: str, cap: ModelCapability
+) -> list[dict[str, Any]]:
+    """Produce the final findings as comment dicts, deterministically when possible.
+
+    Tier 1: force the emit_findings tool (schema-constrained JSON, always parseable).
+    Tier 2: for models that can't force a tool (or if the forced call errors), fall
+    back to the free-text final call routed through parse_with_repair.
+    """
+    if cap.supports_function_calling:
+        try:
+            return await _emit_findings_final(messages, path)
+        except Exception as e:
+            logger.warning(
+                "[agentic] %s: forced emit_findings failed (%s); free-text fallback",
+                path, e,
+            )
+    raw = await _call_llm_final(messages)
+
+    async def _recall(repair_prompt: str) -> str:
+        return await _call_llm(REVIEW_FILE_SYSTEM, repair_prompt)
+
+    return await parse_with_repair(raw, path, _recall)
+
+
+def _comments_to_findings(comments: list[dict[str, Any]], path: str) -> list[Finding]:
     from sift.intelligence.passes.candidates import finding_from_comment
 
-    comments = _parse_review_file_response(raw, path)
     return [finding_from_comment(c, path, origin="agentic") for c in comments]
+
+
+def _findings_from_raw(raw: str, path: str) -> list[Finding]:
+    return _comments_to_findings(_parse_review_file_response(raw, path), path)
 
 
 async def agentic_review(
@@ -353,7 +468,6 @@ async def agentic_review(
 ) -> list[Finding]:
     """Run a bounded tool-calling loop; fall back to generate_candidates on failure."""
     _ = plan
-    _ = cap
     path = file_input.path
     file_diff = file_input.file_diff
     pr_context = file_input.pr_context or {}
@@ -414,8 +528,14 @@ async def agentic_review(
 
             tool_calls = msg_dict.get("tool_calls") or []
             if not tool_calls:
+                # Model stopped calling tools and answered in text. Trust a clean
+                # parse (incl. a legit empty []); only when NO array is extractable
+                # at all (a parse failure) fall back to the deterministic emit call.
                 content = msg_dict.get("content") or ""
-                return _findings_from_raw(content, path)
+                comments = _parse_review_file_response(content, path)
+                if not comments and content.strip() and _extract_json_array(content) is None:
+                    comments = await _final_comments(messages, path, cap)
+                return _comments_to_findings(comments, path)
 
             for tc in tool_calls:
                 fn = tc.get("function") or {}
@@ -433,17 +553,11 @@ async def agentic_review(
                 )
             logger.debug("[agentic] %s: step %d tool call(s)", path, step + 1)
 
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Step limit reached. Respond with your final JSON array of findings "
-                    "only (no more tool calls)."
-                ),
-            }
-        )
-        final = await _call_llm_final(messages)
-        return _findings_from_raw(final, path)
+        # Budget exhausted: get the final answer deterministically (forced emit tool
+        # when supported; free-text + repair otherwise). _final_comments appends its
+        # own "submit now" instruction, so no extra prompt is needed here.
+        comments = await _final_comments(messages, path, cap)
+        return _comments_to_findings(comments, path)
 
     except Exception as e:
         logger.warning(
