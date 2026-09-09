@@ -145,11 +145,64 @@ def _parse_issues_from_comment_body(text: str) -> List[tuple[str, str]]:
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 
 
+_HASH = "#"
+_SLASH = "//"
+_DASH = "--"
+# Correct inline line-comment token per extension, so the injected [L<n>] marker is VALID syntax
+# in the file's language. Covers every language Sift reviews or lints (kept aligned with
+# language_registry._EXTENSION_TO_LANG_KEY, analysis_routing, linter_runner). A `None` value —
+# and any extension not listed — means the format has no safe inline line-comment (JSON, CSS,
+# markup, docs, unknown), so a leading [L<n>] gutter is used instead of an inline comment.
+_COMMENT_MARKER_BY_EXT = {
+    # hash-comment languages
+    ".py": _HASH, ".pyw": _HASH, ".pyi": _HASH,
+    ".rb": _HASH, ".sh": _HASH, ".bash": _HASH, ".zsh": _HASH, ".ps1": _HASH,
+    ".yml": _HASH, ".yaml": _HASH, ".env": _HASH,
+    ".tf": _HASH, ".tfvars": _HASH, ".toml": _HASH, ".ini": _HASH,
+    ".cfg": _HASH, ".conf": _HASH, ".properties": _HASH,
+    # C-style languages
+    ".js": _SLASH, ".mjs": _SLASH, ".cjs": _SLASH, ".jsx": _SLASH,
+    ".ts": _SLASH, ".tsx": _SLASH,
+    ".go": _SLASH, ".rs": _SLASH, ".java": _SLASH,
+    ".c": _SLASH, ".h": _SLASH, ".cc": _SLASH, ".cpp": _SLASH, ".cxx": _SLASH,
+    ".hpp": _SLASH, ".hh": _SLASH,
+    ".cs": _SLASH, ".php": _SLASH, ".swift": _SLASH,
+    ".kt": _SLASH, ".kts": _SLASH, ".scala": _SLASH,
+    ".scss": _SLASH, ".sass": _SLASH, ".less": _SLASH,
+    ".dart": _SLASH, ".groovy": _SLASH,
+    # dash-comment languages
+    ".lua": _DASH, ".hs": _DASH, ".sql": _DASH,
+    # no safe inline line-comment => leading [L<n>] gutter (explicit for readability)
+    ".json": None, ".css": None,
+    ".html": None, ".htm": None, ".xml": None, ".svg": None, ".vue": None, ".erb": None,
+    ".md": None, ".markdown": None, ".rst": None, ".adoc": None, ".txt": None,
+}
+_HASH_FILENAMES = {"Dockerfile", ".dockerignore", ".gitignore", "Makefile"}
+
+
+def _line_comment_token(path: str) -> Optional[str]:
+    """Inline line-comment token for `path`'s language, or None => use a leading gutter marker.
+
+    Covers every language Sift reviews or lints; unknown extensions return None so we never
+    inject a guessed (and possibly invalid) comment token that the model would flag as a bug.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name in _HASH_FILENAMES or name.endswith(".dockerfile"):
+        return _HASH
+    dot = name.rfind(".")
+    ext = name[dot:].lower() if dot > 0 else ""
+    return _COMMENT_MARKER_BY_EXT.get(ext)  # missing => None (gutter): the safe default
+
+
 def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
-    """Append [L<n>] to each '+' line in the diff so the LLM can cite exact new-file line numbers."""
+    """Append a [L<n>] line-number marker to each '+' line so the LLM can cite exact new-file
+    lines. The marker uses the language's real comment token ('#', '//', '--'); for formats with
+    no safe inline comment (JSON/CSS/markup/unknown) it becomes a leading [L<n>] gutter instead,
+    so we never inject invalid syntax the model would (correctly) flag as a bug on its own input.
+    """
     if not diff_chunk or not diff_chunk.strip():
         return diff_chunk
-    comment_marker = "  # " if (path.endswith(".py") or ".py/" in path) else "  // "
+    token = _line_comment_token(path)
     lines_out: List[str] = []
     current_new_line: Optional[int] = None
     for line in diff_chunk.splitlines():
@@ -169,7 +222,13 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
             current_new_line += 1
             lines_out.append(line)
         elif prefix == "+" and not line.startswith("+++"):
-            lines_out.append(line + comment_marker + f"[L{current_new_line}]")
+            if token is None:
+                # No safe inline comment for this language (JSON/CSS/markup/unknown): put the
+                # marker in a leading gutter, which reads as presentation rather than code, so
+                # the model doesn't flag it as invalid syntax.
+                lines_out.append("+" + f"[L{current_new_line}] " + line[1:])
+            else:
+                lines_out.append(line + "  " + token + f" [L{current_new_line}]")
             current_new_line += 1
         elif prefix == "-" and not line.startswith("---"):
             lines_out.append(line)

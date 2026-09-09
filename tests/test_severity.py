@@ -162,3 +162,44 @@ def test_final_labels_swap_after_unverified_prefix():
     out = apply_final_severity_labels([f])
     assert out[0].body.startswith(_UNVERIFIED_PREFIX)
     assert "![BUG]" in out[0].body  # CRITICAL always projects to bug
+
+
+# --- hedged / self-doubting demoter (impact-aware) ---
+_HEDGE = "This may be exploitable if the value is user-controlled."
+
+
+def test_hedged_low_dropped():
+    plan = plan_for(EffortLevel.BALANCED)
+    assert apply_severity_gate([_finding(Impact.LOW, Certainty.LIKELY, body=_HEDGE)], plan) == []
+
+
+def test_hedged_medium_dropped():
+    plan = plan_for(EffortLevel.BALANCED)
+    f = _finding(Impact.MEDIUM, Certainty.LIKELY, body="Cannot be confirmed from the diff.")
+    assert apply_severity_gate([f], plan) == []
+
+
+def test_hedged_high_kept_and_demoted():
+    plan = plan_for(EffortLevel.BALANCED)
+    out = apply_severity_gate([_finding(Impact.HIGH, Certainty.LIKELY, body=_HEDGE)], plan)
+    assert len(out) == 1 and out[0].certainty == Certainty.SPECULATIVE
+
+
+def test_hedged_critical_kept_as_unverified():
+    plan = plan_for(EffortLevel.BALANCED)
+    f = _finding(Impact.CRITICAL, Certainty.LIKELY, body="RCE if the input is attacker-controlled.")
+    out = apply_severity_gate([f], plan)
+    assert len(out) == 1 and out[0].body.startswith(_UNVERIFIED_PREFIX)
+
+
+def test_self_negation_dropped():
+    plan = plan_for(EffortLevel.BALANCED)
+    f = _finding(Impact.MEDIUM, Certainty.LIKELY, body="On closer look this is not a bug.")
+    assert apply_severity_gate([f], plan) == []
+
+
+def test_logical_conditional_not_hedged():
+    # "if x is null -> crash" is a real bug trigger, not an epistemic hedge: must be kept.
+    plan = plan_for(EffortLevel.BALANCED)
+    f = _finding(Impact.LOW, Certainty.LIKELY, body="If x is null this dereferences and crashes.")
+    assert len(apply_severity_gate([f], plan)) == 1

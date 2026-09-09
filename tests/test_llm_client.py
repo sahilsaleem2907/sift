@@ -310,3 +310,51 @@ def test_parse_freeform_has_no_structured_label():
     assert len(out) == 1
     assert out[0]["severity"] is None
     assert out[0]["confidence"] == 7
+
+
+# --- line-number marker uses the correct per-language comment token (or a gutter) ---
+from sift.intelligence.llm_client import (  # noqa: E402
+    _annotate_diff_with_line_numbers,
+    _line_comment_token,
+)
+
+
+def _plus(path):
+    # single added line at new-file L10 (no context line to consume the number)
+    annotated = _annotate_diff_with_line_numbers("@@ -1,1 +10,1 @@\n+added\n", path)
+    return [ln for ln in annotated.splitlines() if ln.startswith("+")][0]
+
+
+def test_marker_hash_for_yaml_and_properties():
+    # regression: these used to get an invalid "// [Ln]" which the model flagged as a bug
+    assert _plus("cfg.yml").endswith("  # [L10]")
+    assert _plus("messages.properties").endswith("  # [L10]")
+
+
+def test_marker_slash_for_cstyle():
+    assert _plus("x.go").endswith("  // [L10]")
+    assert _plus("x.ts").endswith("  // [L10]")
+
+
+def test_marker_dash_for_lua_and_sql():
+    assert _plus("x.lua").endswith("  -- [L10]")
+    assert _plus("x.sql").endswith("  -- [L10]")
+
+
+def test_marker_gutter_for_commentless_formats():
+    # JSON/markup have no safe inline comment -> leading [L<n>] gutter, never a // comment
+    assert _plus("data.json") == "+[L10] added"
+    assert _plus("view.erb") == "+[L10] added"
+
+
+def test_marker_unknown_ext_uses_gutter():
+    assert _plus("weird.xyz") == "+[L10] added"
+
+
+def test_marker_dockerfile_uses_hash():
+    assert _plus("Dockerfile").endswith("  # [L10]")
+
+
+def test_line_comment_token_lookup():
+    assert _line_comment_token("a.py") == "#"
+    assert _line_comment_token("a.zzz") is None

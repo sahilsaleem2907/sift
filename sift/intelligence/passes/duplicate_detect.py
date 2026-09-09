@@ -13,7 +13,9 @@ files, in three stages:
                                normalized token sequences; threshold ≥ 0.8
 
 Each stage only processes functions not already flagged by a previous stage.
-All findings are critic_exempt=True — guaranteed output, no LLM involved.
+Findings are deterministic (no LLM) but NOT critic_exempt: they pass through the severity
+gate, where the `design => CONFIRMED` rule keeps only high-confidence (exact) duplicates and
+drops fuzzy/near-miss ones as subjective-design noise.
 """
 from __future__ import annotations
 
@@ -134,7 +136,7 @@ def _make_finding(
     others: list[FunctionChunk],
     certainty: Certainty,
 ) -> Finding:
-    """Build a critic_exempt Finding for a group of duplicate functions."""
+    """Build a (gate-subject, non-critic_exempt) Finding for a group of duplicate functions."""
     fn_name = primary.name or "<anonymous>"
     all_locations = [primary] + others
     first = all_locations[0]
@@ -167,7 +169,12 @@ def _make_finding(
         origin="duplicate_detect",
         fix=None,
         post_inline=True,
-        critic_exempt=True,
+        # NOT critic_exempt: these are generated after the per-file critic (in
+        # run_pipeline_holistic), so exemption never affected the critic — it only made them
+        # skip the severity gate. Letting them through means the existing
+        # `design => CONFIRMED` gate rule drops fuzzy/near-miss duplicates and keeps only
+        # high-confidence exact ones (hold-to-CONFIRMED).
+        critic_exempt=False,
     )
 
 
@@ -180,8 +187,8 @@ async def detect_duplicate_functions(
 ) -> list[Finding]:
     """Detect duplicate functions across files in a single PR.
 
-    Returns critic_exempt Findings — one per duplicate group, on the second
-    (or later) occurrence. Empty list if no duplicates found or not enough
+    Returns Findings (gate-subject, not critic_exempt) — one per duplicate group, on the
+    second (or later) occurrence. Empty list if no duplicates found or not enough
     eligible functions.
     """
     # Flatten all eligible functions with their file path
