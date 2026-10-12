@@ -50,8 +50,8 @@ def _log_review_config() -> None:
         )
         if plan.run_critic:
             logger.info(
-                "Sift pipeline: LLM critic uses rule_dedupe unless "
-                "SIFT_REVIEW_MODEL is set to a separate model"
+                "Sift pipeline: LLM critic uses the primary model "
+                "(set SIFT_REVIEW_MODEL for a separate one)"
             )
 
     prim = primary_capability()

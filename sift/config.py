@@ -82,6 +82,8 @@ VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
 # Concurrency / rate limiting
 SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") or "10")
 SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
+# LiteLLM retries (exponential backoff) on rate-limit / transient errors, e.g. Groq 429s
+SIFT_LLM_NUM_RETRIES = int(os.environ.get("SIFT_LLM_NUM_RETRIES") or "3")
 SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
 
 # PR blocking via commit status (default: disabled)

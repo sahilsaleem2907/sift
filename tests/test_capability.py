@@ -58,3 +58,17 @@ def test_caching():
             detect("cached/model")
             detect("cached/model")
     assert call_count == 1
+
+
+def test_groq_gpt_oss_capability():
+    """LiteLLM metadata drives ctx/tools/reasoning for groq/openai/gpt-oss-120b."""
+    cap = detect("groq/openai/gpt-oss-120b")
+    assert cap.context_window == 131072
+    assert cap.supports_function_calling is True
+    assert cap.supports_reasoning is True
+
+
+def test_reasoning_falls_back_to_substring_when_litellm_unknown():
+    with mock.patch("litellm.supports_reasoning", side_effect=Exception("unknown")):
+        cap = detect("custom/deepseek-r1-distill")
+    assert cap.supports_reasoning is True
