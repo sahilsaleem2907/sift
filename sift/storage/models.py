@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """SQLAlchemy models."""
 from datetime import datetime, timezone
 from typing import Optional

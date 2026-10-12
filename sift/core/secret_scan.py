@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Built-in regex secret scanner.
 
 Scans added lines of a unified diff for hardcoded secrets and returns

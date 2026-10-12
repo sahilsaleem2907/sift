@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Run CodeQL on a repo checkout: create DB, analyze with suite, parse SARIF. Phase 1: full create per run."""
 import json
 import logging

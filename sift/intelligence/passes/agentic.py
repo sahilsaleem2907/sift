@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Bounded agentic review loop with tool-calling (Phase 4, high effort)."""
 from __future__ import annotations
 

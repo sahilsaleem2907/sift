@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Pass 4 (Phase 2): severity rubric + noise gate."""
 import re
 from dataclasses import replace

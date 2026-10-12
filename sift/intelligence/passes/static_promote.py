@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Promote ERROR-severity static-tool findings directly to Finding objects.
 
 Static tools (semgrep, gitleaks via semgrep rules, codeql) that fire at ERROR

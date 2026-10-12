@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Model capability detection for adapting calls and context budgets."""
 import json
 import logging

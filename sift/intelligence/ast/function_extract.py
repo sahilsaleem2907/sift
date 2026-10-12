@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Extract function-level chunks from source files for modified diff ranges."""
 import hashlib
 import logging

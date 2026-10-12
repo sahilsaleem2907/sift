@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """LLM integration for code review (LiteLLM: OpenAI, Anthropic, Gemini, Ollama, Azure, Bedrock)."""
 import json
 import logging
@@ -160,7 +161,7 @@ async def _call_llm(
         }
         headers = {"Authorization": f"Bearer {resolved_key}"}
         for attempt in range(5):
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
                 resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code == 429:
                 wait = 2 ** attempt
@@ -179,7 +180,7 @@ async def _call_llm(
         ],
         "api_base": resolved_base,
         "api_key": resolved_key,
-        "timeout": 120.0,
+        "timeout": config.LLM_TIMEOUT,
         "temperature": temperature,
         "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Core data types for review findings."""
 from __future__ import annotations
 

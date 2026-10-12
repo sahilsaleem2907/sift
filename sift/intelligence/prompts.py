@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Centralized prompt templates for the review pipeline."""
 from string import Template
 from typing import Any
