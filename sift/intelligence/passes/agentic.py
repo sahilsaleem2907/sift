@@ -153,7 +153,9 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
         "tools": TOOLS,
         "tool_choice": "auto",
         "api_base": config.LLM_API_BASE or None,
+        "api_key": config.LLM_API_KEY or None,
         "timeout": 120.0,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }
     return await acompletion(**kwargs)
 
@@ -163,7 +165,9 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
         "model": config.LLM_MODEL,
         "messages": messages,
         "api_base": config.LLM_API_BASE or None,
+        "api_key": config.LLM_API_KEY or None,
         "timeout": 120.0,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }
     response = await acompletion(**kwargs)
     return (response.choices[0].message.content or "").strip()

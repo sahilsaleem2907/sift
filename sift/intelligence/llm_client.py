@@ -135,7 +135,12 @@ async def _call_llm(
     """Call configured LLM provider; return assistant message content or empty string."""
     resolved_base = api_base or config.LLM_API_BASE or None
     resolved_model = model or config.LLM_MODEL
-    resolved_key = api_key or config.LLM_API_KEY or None
+    # Inherit LLM_API_KEY only for the primary model or a call sharing its base URL —
+    # a critic on a different provider must not be sent the primary provider's key.
+    shares_primary = resolved_model == config.LLM_MODEL or (
+        resolved_base is not None and resolved_base == config.LLM_API_BASE
+    )
+    resolved_key = api_key or (config.LLM_API_KEY if shares_primary else None) or None
 
     # When both a custom base and key are provided, call the OpenAI-compatible endpoint
     # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth.
@@ -174,8 +179,10 @@ async def _call_llm(
             {"role": "user", "content": user_content},
         ],
         "api_base": resolved_base,
+        "api_key": resolved_key,
         "timeout": config.LLM_TIMEOUT,
         "temperature": temperature,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }
     response = await acompletion(**kwargs)
     return (response.choices[0].message.content or "").strip()
