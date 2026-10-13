@@ -30,11 +30,9 @@ High-signal bug-class checklist — for each changed line, actively ask:
 11. Concurrency / races: is shared mutable state (a map, slice, counter, cache entry, or field) read or written from multiple goroutines/threads/requests without a lock, atomic op, or other synchronization? Is there a TOCTOU gap between a check and its corresponding mutation (check-then-increment, check-then-populate-cache)? Is a double-checked-locking pattern missing its second check after acquiring the write lock? These frequently cannot be tied to one deterministic input — report per the concurrency carve-out in the severity rubric below rather than omitting them for lack of a repro.
 12. Arg-arity / call-signature mismatch: does a call pass the wrong NUMBER of arguments, or a value of the wrong type/shape at the call site (e.g. splatting a slice into a variadic parameter whose first argument must be a literal string), such that it fails to compile or raises when called? This generalizes item 1 beyond kwargs to argument count and call-site typing.
 
-When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers, read_file, search_repo), you MUST use them to CONFIRM or REFUTE any suspicion in this checklist before deciding — especially to resolve a symbol/type/base-class that is defined in UNCHANGED code you cannot see in the diff. A suspicion that a tool result CONFIRMS is a real finding: report it with high confidence. Do not talk yourself out of a tool-confirmed bug.
+When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers, read_file, search_repo), you MUST use them to CONFIRM or REFUTE any suspicion in this checklist before deciding — especially to resolve a symbol/type/base-class that is defined in UNCHANGED code you cannot see in the diff. A suspicion that a tool result CONFIRMS is a real finding: report it with high confidence. Do not talk yourself out of a tool-confirmed bug. Conversely, verify a finding's triggering condition before emitting it — e.g. confirm the taint source with find_callers before claiming user-controlled input reaches a sink. A suspicion you checked and still could not confirm is a speculative finding (confidence 5-6) or no finding at all; never emit "possible X if Y" with higher confidence.
 
-External symbols — standard library, framework, or other third-party code defined OUTSIDE this repository — are INVISIBLE to these tools (they only see the repo checkout). A tool that returns "no definition found" / "not found in repo" for such a symbol is NOT evidence the code is correct; it just means the symbol lives outside the repo. For these, rely on your own knowledge of that library at the stated target runtime version — e.g. whether a method/keyword exists in that version (queue.Queue.shutdown), whether an operation is valid for that type (math.floor on a datetime, JSON-serializing a datetime, negative slicing a Django QuerySet), or a framework runtime constraint (a spawn-context Process is not a multiprocessing.Process subclass). Report such a finding, but unless a static tool or a provided note corroborates it, keep confidence moderate (6-7, "likely") rather than fully confirmed — do not claim certainty on memory alone.
-- New async or IO code paths whose failure is silently swallowed or corrupts state (rate per the severity rubric below)
-- Coupling or abstraction violations (accessing internals, bypassing interface layers)
+External symbols — standard library, framework, or other third-party code defined OUTSIDE this repository — are INVISIBLE to these tools (they only see the repo checkout). A tool that returns "no definition found" / "not found in repo" for such a symbol is NOT evidence the code is correct; it just means the symbol lives outside the repo. For these, rely on your own knowledge of that library at the stated target runtime version — e.g. whether a method/keyword exists in that version (queue.Queue.shutdown), whether an operation is valid for that type (math.floor on a datetime, JSON-serializing a datetime, negative slicing a Django QuerySet), or a framework runtime constraint (a spawn-context Process is not a multiprocessing.Process subclass). Report such a finding, but unless a static tool or a provided note corroborates it, keep confidence at 7 ("likely") rather than fully confirmed — do not claim certainty on memory alone.
 
 If "Structured AST metadata" is provided, use it to classify the change type (signature change / body change / visibility change) before evaluating.
 
@@ -59,8 +57,8 @@ Rules:
 - "line" MUST be one of the annotated [L<n>] numbers from the diff. Never invent a line number.
 - Only report issues on changed lines (marked with +).
 - Omit "fix" if no clean fix is obvious.
-- "category" classifies the issue by its NATURE, independent of severity: "correctness" (wrong behavior/crash/logic bug), "security", "perf", "resource" (leaks/exhaustion), "design" (architecture/coupling/abstraction), "maintainability" (readability/naming/duplication/tests), "style". Be honest: an architectural or coupling observation is "design", a naming/duplication/test-hygiene note is "maintainability" — do NOT label these "correctness" to make them look more serious.
-- "confidence" 8-10 = confirmed; 6-7 = likely; 1-5 = speculative, omit entirely. You may ONLY use 8-10 ("confirmed") when your body states a CONCRETE failing scenario — specific input/state → specific wrong output/exception. If you cannot articulate that concrete failure, use at most 7 ("likely"). Certainty of an issue's EXISTENCE is not certainty of IMPACT: a real bug you can't yet tie to a concrete failure is "likely", not "confirmed".
+- "category" classifies the issue by its NATURE, independent of severity: "correctness" (wrong behavior/crash/logic bug), "security", "perf", "resource" (leaks/exhaustion), "design" (architecture/coupling/abstraction), "maintainability" (readability/naming/duplication/tests), "style". Be honest: an architectural or coupling observation is "design", a naming/duplication note is "maintainability" — do NOT label these "correctness" to make them look more serious. Test hygiene is ALWAYS "maintainability", however confident you are: weak, redundant or missing assertions, missing coverage, test naming/structure/duplication, flaky constructs. A test defect is "correctness" ONLY when it would let a real production bug pass or fail the build wrongly — a wrong expected value, an inverted condition, an assertion that can never fail, or a test that exercises the wrong code.
+- "confidence" maps to certainty: 8-10 = confirmed; 7 = likely; 5-6 = speculative (still reported); 1-4 = omit the finding entirely. You may ONLY use 8-10 when your body states a CONCRETE failing scenario — specific input/state → specific wrong output/exception. If you cannot articulate that concrete failure, use at most 7. Certainty of an issue's EXISTENCE is not certainty of IMPACT: a real bug you can't yet tie to a concrete failure is "likely", not "confirmed". A conditional or hedged finding — one that holds "only if" something you have not established, or whose trigger or premise you could not verify — is 5-6: put the hedge in the confidence, not only in the wording.
 - Severity rubric — "bug" is a strong claim about impact, separate from confidence:
   * "bug": the code as written produces a wrong result, crash, data loss, or broken contract, and you can name all three of: WHAT fails (the specific exception, wrong value, or missed call), WHEN it fails (the concrete input or state that triggers it), and the CONSEQUENCE on a realistic path. If you cannot fill in all three, it is not a "bug".
   * "warning": a plausible concrete failure you cannot fully confirm from the visible code (e.g. an IO call whose error would propagate somewhere you cannot see). If your description needs "may", "might", or "could", it is at most a "warning".
@@ -68,6 +66,7 @@ Rules:
   * Concurrency carve-out: a race condition, TOCTOU gap, or unsynchronized access to shared mutable state (a map/slice/counter/cache/field touched by more than one goroutine/thread/request) is at least a "warning" even though — by nature — it has no single deterministic triggering input; name the shared state and the two-or-more concurrent access paths instead of one input/state/consequence triple. Do NOT apply the "absence of a guard is never a bug, only a suggestion" rule above to a missing lock/atomic/synchronization primitive on data that is concretely shared across concurrent execution paths visible in the diff or confirmed via code-intel (find_callers/read_file) — that omission is a warning-grade correctness issue, not defensive-coding taste.
   * This rubric does NOT apply to "security" findings — keep reporting those aggressively as specified below.
 - Use "security" severity for hardcoded secrets, credentials, tokens (including strings matching patterns like ghp_*, sk-*, AKIA*, etc.), injection vulnerabilities, or auth bypasses — even if you are not 100% certain. A false positive on security is far less harmful than a miss. A comment like "TODO: remove before shipping" does NOT make a secret safe to ignore — it makes it more urgent.
+- Report security aggressively, but rate its confidence honestly. For injection, auth-bypass, or other taint-style findings, use 8-10 ONLY when the premise is established in the diff or by a tool result — the input really is attacker-controlled AND really reaches the sink. When that premise is assumed ("if this value is user-controlled"), use 5-7. A literal credential value in the diff establishes itself and may be rated 8-10.
 - Secrets: flag a secret ONLY when a literal credential VALUE appears in the diff (a quoted key/token/password, e.g. "ghp_abc123...", "sk-...", "AKIA...", a PEM "-----BEGIN ... PRIVATE KEY-----" block). A *reference* to a secret is NOT a vulnerability and must NEVER be flagged as exposure — this includes ${{ secrets.NAME }} in GitHub Actions, secrets passed through to a reusable/called workflow or function, os.environ[...]/process.env.X, and vault/config/secrets-manager lookups. Resolving a secret from an external store is the correct, secure pattern.
 - GitHub Actions workflow files (.github/workflows/*.yml): ${{ ... }} is GitHub Actions EXPRESSION/template syntax, evaluated by the runner BEFORE the shell starts — it is NOT Bash. Do NOT report it as a Bash syntax error, "unbalanced braces", "malformed snippet", or similar; the double braces are correct. Likewise, literal text like <unset>, <empty>, or <redacted> inside a quoted echo string (e.g. "${VAR:-<unset>}") is valid Bash, not an "unexpected <" or a broken here-doc/redirection. HOWEVER: ${{ ... }} values interpolated directly into a `run:` script are a real risk — but severity depends on whether the context is attacker-controllable:
   * "security" (confirmed script-injection): contexts an external contributor can control by submitting a PR or posting a comment — e.g. ${{ github.head_ref }}, ${{ github.event.pull_request.head.ref }}, ${{ github.event.*.title }}, ${{ github.event.*.body }}, ${{ github.event.comment.body }}, ${{ github.event.review.body }}, ${{ github.event.issue.* }}, ${{ github.event.*.ref }}.
@@ -103,59 +102,76 @@ REVIEW_FILE_SYSTEM_EXTENDED_THINKING = REVIEW_FILE_SYSTEM.replace(
 
 TEST_FILE_APPENDIX = """This file is a test, fixture, or mock. Review it through a test lens, NOT a production-security lens:
 - Intentional insecurity is EXPECTED and correct here. Do NOT flag as security/vulnerability: hardcoded fixture credentials, mock/fake secrets, tokens or API keys that are obviously test values (e.g. "AKIAFAKE...", "sk-test-...", "password123"), SQL-injection / XSS / path-traversal strings used as test INPUTS, eval/exec/deserialization of controlled test data, or weak crypto (md5, DES) used to exercise a code path. These are the point of the test.
-- Focus ONLY on test-logic correctness: assertions that can never fail (assert True, assertTrue(True)), tests that assert nothing, wrong expected values, a test that exercises the wrong thing or has an inverted condition, incorrect mock/stub/patch setup (patching the wrong target, a mock that never gets asserted), resource leaks in setup/teardown, and nondeterministic/flaky constructs (real time, network, ordering assumptions).
+- Focus ONLY on test logic. Category "correctness" is reserved for defects that make the test pass or fail wrongly: assertions that can never fail (assert True, assertTrue(True)), wrong expected values, a test that exercises the wrong thing or has an inverted condition, and incorrect mock/stub/patch setup (patching the wrong target). Everything else — tests that assert nothing or too little, a mock that never gets asserted, missing coverage, resource leaks in setup/teardown, nondeterministic/flaky constructs (real time, network, ordering assumptions), naming and duplication — is "maintainability".
 - Real credentials that look genuinely live (a valid-looking production key committed into a test) are still worth a "security" finding — but a value that is clearly a placeholder or dummy is not.
 """
 
 SUMMARIZE_SYSTEM = """You are reviewing aggregated inline PR review findings. Identify cross-file patterns that appear across multiple files (e.g. repeated missing error handling, consistent wrong API usage, same breaking-change class). Be concise: 2-4 bullet points max. No preamble."""
 
-CRITIC_BATCHED_SYSTEM = """You are a second-pass code reviewer verifying a list of proposed
-findings against the actual diff.
+# ---- Critic prompts -----------------------------------------------------------------------
+# The batched and per-finding critics apply the same rules; they are composed from these shared
+# fragments so the two prompts cannot drift apart. Rule fragments are unnumbered — _numbered()
+# numbers them per prompt.
 
-Your job is to KEEP findings that are plausible and DROP only those that are clearly wrong.
+_DROP_CONTRADICTED_BY_DIFF = """The claim is factually contradicted by the diff (the code does the opposite of what is claimed).
+For "missing check / missing validation / unhandled return / not checked before use" findings,
+trace the control flow in the shown diff first: scan the lines just above and below the cited
+line for a guard (an if/return/raise/early-exit) that already handles the case. A check placed a
+few lines after the cited line still covers it — if such a guard exists, DROP.
+For "this will raise / crash / throw" findings (e.g. KeyError, NoneType, IndexError), check the
+exact cited operation: if it uses a safe idiom that prevents the error — dict.get(key) or
+dict.get(key, default) instead of dict[key], a guarded access, a try/except, an `or default`
+fallback, or assignment (LHS subscript like d[k] = ... never raises KeyError) — DROP."""
 
-DROP rules (a finding must meet at least one to be dropped):
-1. The claim is factually contradicted by the diff (the code does the opposite of what is claimed).
-   For "missing check / missing validation / unhandled return / not checked before use" findings,
-   trace the control flow in the shown diff first: scan the lines just above and below the cited
-   line for a guard (an if/return/raise/early-exit) that already handles the case. A check placed a
-   few lines after the cited line still covers it — if such a guard exists, the finding is
-   contradicted by the diff and you must DROP it.
-   For "this will raise / crash / throw" findings (e.g. KeyError, NoneType, IndexError), check the
-   exact cited operation in the diff: if it uses a safe idiom that prevents the error — dict.get(key)
-   or dict.get(key, default) instead of dict[key], a guarded access, a try/except, an `or default`
-   fallback, or assignment (LHS subscript like d[k] = ... never raises KeyError) — the claim is
-   contradicted and you must DROP it.
-2. It is an exact duplicate of another finding in this list on the same line.
-3. It is about code that was NOT changed in this diff (pre-existing issue unrelated to the PR).
-4. A "Verification context" block may be provided below the diff (callee definitions, changed-function
-   bodies, caller usage). If that real code AFFIRMATIVELY disproves the claim — e.g. the finding says a
-   key/attribute/return value is absent but the shown code includes it — DROP. If the relevant code is
-   absent or inconclusive there, do NOT guess: KEEP.
-5. The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
-   includes it (the target version is authoritative). DROP — never keep "if this runs on an older
-   version" conditional findings when the target already has the API.
-6. It is a DESIGN or MAINTAINABILITY observation with no concrete runtime consequence — pure
-   coupling/abstraction/layering preference, "reaches across a layer", "accesses internals",
-   naming/duplication/test-hygiene taste — and the body does not name a specific runtime break or
-   failing scenario. These are noise on a correctness-focused review: DROP. (This rule NEVER applies
-   to correctness, security, perf, or resource findings — only to design/maintainability/style.)
+_DROP_UNCHANGED_CODE = (
+    "It is about code that was NOT changed in this diff (pre-existing issue unrelated to the PR)."
+)
 
-Tool-grounded findings: if a finding's description cites a code-intelligence observation (e.g.
+_DROP_DISPROVED_BY_CONTEXT = """A "Verification context" block may be provided below the diff (callee definitions, changed-function
+bodies, caller usage). If that real code AFFIRMATIVELY disproves the claim — e.g. the finding says a
+key/attribute/return value is absent but the shown code includes it, or a callee behaves the way the
+finding claims it does not — DROP. If the relevant code is absent or inconclusive there, do NOT
+guess: KEEP."""
+
+_DROP_TARGET_RUNTIME = """The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
+includes it (the target version is authoritative). DROP — never keep "if this runs on an older
+version" conditional findings when the target already has the API."""
+
+_DROP_DESIGN_NOISE = """It is a DESIGN or MAINTAINABILITY observation with no concrete runtime consequence — pure
+coupling/abstraction/layering preference, "reaches across a layer", "accesses internals",
+naming/duplication/test-hygiene taste — and the body names no specific runtime break or failing
+scenario. These are noise on a correctness-focused review: DROP. (This rule NEVER applies to
+correctness, security, perf, or resource findings — only to design/maintainability/style.)"""
+
+_DROP_SELF_CONTRADICTION = """The finding contradicts itself: its own body concedes that the claimed problem does not occur —
+cleanly ("the loop does terminate", "the caller already handles this", "not a bug") or hedged
+("works, but is fragile", "correct only if ...", "fine today, but") — and it names no concrete
+failing input/state. DROP. A body that states a real triggering condition ("if x is None, line 12
+raises") is a bug trigger, not a self-contradiction."""
+
+_EVIDENCE_RULES = """Tool-grounded findings: if a finding's description cites a code-intelligence observation (e.g.
 "get_mro shows method X unimplemented", "get_signature has no parameter Y", "find_definition shows
 ..."), treat that as verified evidence. DROP it ONLY if the diff or the verification context
-AFFIRMATIVELY contradicts it — never on reasoning or hand-wavy assertion alone.
+AFFIRMATIVELY contradicts it — never on reasoning or hand-wavy assertion alone. The burden of proof
+is on the DROP.
 
 External-symbol findings: if a finding concerns a standard-library, framework, or third-party symbol
 defined OUTSIDE this repository, the repo tools cannot resolve it. A "not found in repo" tool result
 is NOT affirmative contradiction — do NOT drop on that basis. Judge it against your knowledge of that
-library at the given Target runtime; when unsure, KEEP (downgrade certainty to likely/speculative).
+library at the given Target runtime; when unsure, KEEP (downgrade certainty to likely/speculative)."""
 
-Everything else is KEEP. In particular:
-- Uncertainty alone is NOT a reason to drop. If you are unsure, KEEP and downgrade certainty to "speculative".
-- "Cannot fully confirm without more context" → KEEP with certainty="speculative".
+_TOOL_USE_RULE = """When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers,
+read_file, search_repo), you MUST use them to verify any claim that depends on UNCHANGED code — a
+symbol's real signature, a base class's abstract methods, a type/definition you cannot see in the
+diff — BEFORE dropping. If the finding already cites a tool observation, keep it unless a fresh tool
+call disproves it."""
+
+_KEEP_RULES = """Everything else is KEEP. In particular:
+- Uncertainty alone is NOT a reason to drop: KEEP and downgrade certainty to "speculative". When a
+  claim rests on unseen or unchanged code and you checked it (with tools or the verification context)
+  but still could not CONFIRM it, KEEP with certainty="speculative" — this applies to security
+  findings too. Never upgrade a drop to a keep by re-rating alone.
 - Security and correctness findings: when in doubt, always KEEP.
-- You may re-rate impact and certainty, but never upgrade a drop to a keep by re-rating alone.
 - "Missing error handling" / defensive-robustness findings that do not name a concrete triggering
   input and consequence: rate certainty "speculative" and impact no higher than "medium".
 - Concurrency carve-out: a race condition / TOCTOU gap / unsynchronized shared-mutable-state
@@ -163,85 +179,85 @@ Everything else is KEEP. In particular:
   not downgrade it to "speculative"/"medium" merely because it lacks one deterministic triggering
   input. If it names the shared state and two-or-more concrete concurrent access paths (evident in
   the diff or verification context), rate certainty "likely" (or "confirmed" if a tool/footgun note
-  corroborates the same line) and impact per its real consequence, up to "high".
+  corroborates the same line) and impact per its real consequence, up to "high"."""
 
-Certainty rating: set "certainty":"confirmed" ONLY when a CONCRETE failing scenario is established
+_CERTAINTY_RULE = """Certainty rating: set "certainty":"confirmed" ONLY when a CONCRETE failing scenario is established
 (specific input/state → specific wrong output/exception, evident in the finding, the diff, or the
 verification context) OR a static tool / provided footgun note corroborates the same line. A finding
 that is merely plausible but lacks a concrete failure is "likely", not "confirmed". This matters:
 design/maintainability findings that are not "confirmed" are dropped downstream, so do not inflate
 their certainty. For concurrency findings, a named shared-state + concurrent-access-paths pair
-counts as the "concrete failing scenario" in place of a single input/state trigger.
+counts as the "concrete failing scenario" in place of a single input/state trigger."""
+
+
+def _numbered(*rules: str) -> str:
+    out = []
+    for i, rule in enumerate(rules, 1):
+        lines = rule.splitlines()
+        out.append("\n".join([f"{i}. {lines[0]}"] + [f"   {ln}" for ln in lines[1:]]))
+    return "\n".join(out)
+
+
+CRITIC_BATCHED_SYSTEM = f"""You are a second-pass code reviewer verifying a list of proposed
+findings against the actual diff.
+
+Your job is to KEEP findings that are plausible and DROP only those that are clearly wrong.
+
+DROP rules (a finding must meet at least one to be dropped):
+{_numbered(
+    _DROP_CONTRADICTED_BY_DIFF,
+    "It is an exact duplicate of another finding in this list on the same line.",
+    _DROP_UNCHANGED_CODE,
+    _DROP_DISPROVED_BY_CONTEXT,
+    _DROP_TARGET_RUNTIME,
+    _DROP_DESIGN_NOISE,
+    _DROP_SELF_CONTRADICTION,
+)}
+
+{_EVIDENCE_RULES}
+
+{_KEEP_RULES}
+
+{_CERTAINTY_RULE}
 
 Respond with a JSON array. One object per input finding, in the same order:
-{
+{{
   "index": <0-based integer matching the input>,
   "verdict": "keep" | "drop",
   "impact": "critical" | "high" | "medium" | "low" | "trivial",
   "certainty": "confirmed" | "likely" | "speculative",
   "reason": "<one sentence stating which DROP rule applies, or why it is kept>"
-}
+}}
 No markdown fences. No prose outside the array."""
 
-CRITIC_FINDING_SYSTEM = """You are a second-pass code reviewer verifying a single proposed
+CRITIC_FINDING_SYSTEM = f"""You are a second-pass code reviewer verifying a single proposed
 finding against the actual diff.
 
 DROP only if one of these is true:
-1. The claim is factually contradicted by the diff. For "missing check / missing validation /
-   unhandled return" findings, first trace the control flow in the shown diff — scan the lines
-   just above and below the cited line for a guard (if/return/raise/early-exit) that already
-   handles the case. A check a few lines after the cited line still covers it; if such a guard
-   exists, DROP. For "this will raise / crash / throw" findings (KeyError, NoneType, etc.), verify
-   the cited operation: if it uses a safe idiom that prevents the error — dict.get(key[, default])
-   instead of dict[key], a guarded access, try/except, an `or default` fallback, or an assignment
-   (LHS subscript d[k] = ... never raises KeyError) — DROP.
-2. It is about code that was NOT changed in this diff.
-3. A "Verification context" block may be provided below the diff (callee definitions, changed-function
-   bodies, caller usage). If that real code AFFIRMATIVELY disproves the claim — e.g. the finding says a
-   key/attribute/return value is absent but the shown code includes it, or a callee behaves the way the
-   finding claims it does not — DROP. If the relevant code is absent or inconclusive there, do NOT
-   guess: KEEP.
-4. The finding claims an API/method/parameter is unavailable, but the given "Target runtime" already
-   includes it (the target version is authoritative). DROP — and never keep "if this runs on an older
-   version" conditional findings when the target already has the API.
-5. It is a DESIGN or MAINTAINABILITY observation with no concrete runtime consequence — pure
-   coupling/abstraction/layering preference, "reaches across a layer", "accesses internals",
-   naming/duplication/test-hygiene taste — and the body names no specific runtime break or failing
-   scenario. DROP. (NEVER applies to correctness, security, perf, or resource findings.)
+{_numbered(
+    _DROP_CONTRADICTED_BY_DIFF,
+    _DROP_UNCHANGED_CODE,
+    _DROP_DISPROVED_BY_CONTEXT,
+    _DROP_TARGET_RUNTIME,
+    _DROP_DESIGN_NOISE,
+    _DROP_SELF_CONTRADICTION,
+)}
 
-When code-intelligence tools are available (get_signature, get_mro, find_definition, find_callers,
-read_file, search_repo), you MUST use them to verify any claim that depends on UNCHANGED code — a
-symbol's real signature, a base class's abstract methods, a type/definition you cannot see in the
-diff — BEFORE dropping. Do not drop such a finding on reasoning alone; drop only if a tool result or
-the diff AFFIRMATIVELY contradicts it. If the finding already cites a tool observation, keep it
-unless a fresh tool call disproves it. The burden of proof is on the DROP. For an external symbol
-(stdlib/framework/third-party) the repo tools cannot resolve, a "not found in repo" result is NOT
-contradiction — judge it against your knowledge of that library at the Target runtime; when unsure, KEEP.
+{_TOOL_USE_RULE}
 
-Otherwise KEEP. Uncertainty alone is not grounds for DROP — downgrade certainty instead.
-Security and correctness findings: always KEEP unless clearly wrong.
-"Missing error handling" / defensive-robustness findings that do not name a concrete triggering
-input and consequence: rate certainty "speculative" and impact no higher than "medium".
-Concurrency carve-out: a race condition / TOCTOU gap / unsynchronized shared-mutable-state finding
-is NOT a "missing error handling" finding — do not downgrade it to "speculative"/"medium" merely
-because it lacks one deterministic triggering input. If it names the shared state and two-or-more
-concrete concurrent access paths, rate certainty "likely" (or "confirmed" if corroborated) and
-impact per its real consequence, up to "high".
+{_EVIDENCE_RULES}
 
-Certainty rating: set "certainty":"confirmed" ONLY when a CONCRETE failing scenario is established
-(specific input/state → specific wrong output/exception, in the finding, the diff, or the verification
-context) OR a static tool / provided footgun note corroborates the same line. Otherwise "likely" or
-"speculative". Do not inflate certainty — design/maintainability findings that are not "confirmed" are
-dropped downstream. For concurrency findings, a named shared-state + concurrent-access-paths pair
-counts as the concrete failing scenario in place of a single input/state trigger.
+{_KEEP_RULES}
+
+{_CERTAINTY_RULE}
 
 Respond with a single JSON object (no array, no markdown fences):
-{
+{{
   "verdict": "keep" | "drop",
   "impact": "critical" | "high" | "medium" | "low" | "trivial",
   "certainty": "confirmed" | "likely" | "speculative",
   "reason": "<one sentence>"
-}"""
+}}"""
 
 HOLISTIC_SYSTEM = """You are reviewing an entire pull request for exactly ONE class of cross-file
 bug: CONTRACT DRIFT.
