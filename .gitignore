@@ -12,3 +12,9 @@ __pycache__/
 docs/plans/*
 sift.egg-info/*
 
+
+# Benchmark scripts (local only)
+scripts/bench_env.sh
+scripts/smoke_test.sh
+scripts/cleanup_comments.sh
+scripts/full_*_run.sh

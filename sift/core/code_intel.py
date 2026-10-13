@@ -187,7 +187,8 @@ def _class_methods(class_node) -> Tuple[List[str], List[str]]:
         if not name:
             continue
         methods.append(name)
-        # abstract if @abstractmethod OR body is just `...`/`pass`/docstring
+        # abstract only if @abstractmethod — that's all Python enforces; a `pass`/`...` body is
+        # usually an optional no-op hook, so treating it as abstract would invent missing methods
         if decorated_abstract:
             abstract.append(name)
     return methods, abstract
