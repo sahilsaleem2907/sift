@@ -89,6 +89,11 @@ async def run_pipeline_per_file(
             repo_root=(pr_meta.repo_root if pr_meta else None),
         )
     else:
+        if plan.enable_agentic:
+            logger.info(
+                "[pipeline] %s: agentic skipped (model reports no tool calling); one-shot review",
+                file.path,
+            )
         # Request reasoning on the primary generator only when the model supports it.
         reasoning_effort = plan.reasoning_effort if cap.supports_reasoning else None
         candidates = await generate_candidates(

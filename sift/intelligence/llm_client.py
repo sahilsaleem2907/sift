@@ -237,6 +237,67 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
     return "\n".join(lines_out)
 
 
+def resolve_api_key(
+    model: str, api_base: Optional[str], api_key: Optional[str] = None
+) -> Optional[str]:
+    """Explicit key wins; otherwise inherit LLM_API_KEY only for the primary model or a call
+    sharing its base URL — a critic on a different provider must not be sent the primary key."""
+    shares_primary = model == config.LLM_MODEL or (
+        api_base is not None and api_base == config.LLM_API_BASE
+    )
+    return api_key or (config.LLM_API_KEY if shares_primary else None) or None
+
+
+def litellm_kwargs(
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Routing/auth/retry kwargs shared by every LiteLLM ``acompletion`` call.
+
+    Resolves model/base/key the same way for the generator, agentic loop, critic and
+    holistic. An Ollama endpoint (detected via its ``/api/show``) is called through
+    Ollama's OpenAI-compatible ``/v1`` API: LiteLLM's model map doesn't know Ollama model
+    ids (a bare id has no provider at all), and its native ``ollama_chat`` route mangles
+    tool-call history. ``openai/`` here selects the request *format*, not the model vendor.
+    Exceptions (429/5xx/timeouts) are retried by LiteLLM itself via ``num_retries``.
+    """
+    from sift.intelligence.capability import is_ollama_endpoint, ollama_model_name
+
+    resolved_model = model or config.LLM_MODEL
+    resolved_base = api_base or config.LLM_API_BASE or None
+    resolved_key = resolve_api_key(resolved_model, resolved_base, api_key)
+    kwargs: Dict[str, Any] = {
+        "model": resolved_model,
+        "api_base": resolved_base,
+        "api_key": resolved_key,
+        "timeout": config.LLM_TIMEOUT,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
+    }
+    if resolved_base and is_ollama_endpoint(resolved_model, resolved_base, resolved_key):
+        base = resolved_base.rstrip("/")
+        kwargs["model"] = f"openai/{ollama_model_name(resolved_model)}"
+        kwargs["api_base"] = base if base.endswith("/v1") else f"{base}/v1"
+        # The OpenAI client refuses to send without a key; local Ollama ignores it.
+        kwargs["api_key"] = resolved_key or "ollama"
+        # LiteLLM rejects reasoning_effort for models it doesn't know; Ollama accepts it.
+        kwargs["allowed_openai_params"] = ["reasoning_effort"]
+    return kwargs
+
+
+def ignores_tool_choice(model: Optional[str] = None, api_base: Optional[str] = None) -> bool:
+    """True when the endpoint ignores ``tool_choice`` (Ollama, on both its native and /v1 APIs).
+
+    Forced-tool and tool_choice="none" calls are then only a hint, so final-answer steps must
+    not rely on them.
+    """
+    from sift.intelligence.capability import is_ollama_endpoint
+
+    resolved_model = model or config.LLM_MODEL
+    resolved_base = api_base or config.LLM_API_BASE or None
+    return bool(resolved_base) and is_ollama_endpoint(resolved_model, resolved_base)
+
+
 async def _call_llm(
     system: str,
     user_content: str,
@@ -258,20 +319,17 @@ async def _call_llm(
     thinking budget, so we force temperature=1 and a larger max_tokens on those calls. Only the
     LiteLLM path honours it; the OpenAI-compatible gateway branch below ignores it.
     """
-    resolved_base = api_base or config.LLM_API_BASE or None
+    kwargs: Dict[str, Any] = litellm_kwargs(model, api_base, api_key)
     resolved_model = model or config.LLM_MODEL
-    # Inherit LLM_API_KEY only for the primary model or a call sharing its base URL —
-    # a critic on a different provider must not be sent the primary provider's key.
-    shares_primary = resolved_model == config.LLM_MODEL or (
-        resolved_base is not None and resolved_base == config.LLM_API_BASE
-    )
-    resolved_key = api_key or (config.LLM_API_KEY if shares_primary else None) or None
+    resolved_base = kwargs["api_base"]
+    resolved_key = kwargs["api_key"]
+    routed_to_ollama = "allowed_openai_params" in kwargs
 
-    # When both a custom base and key are provided, call the OpenAI-compatible endpoint
-    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth. This path
-    # keeps plain string messages (no Anthropic cache_control): it's for OpenRouter/Ollama/
-    # gateways, not direct Anthropic.
-    if resolved_key and resolved_base:
+    # When both a custom base and key are provided (and it isn't Ollama, which goes through
+    # LiteLLM above), call the OpenAI-compatible endpoint directly. This path keeps plain
+    # string messages (no Anthropic cache_control): it's for OpenRouter/gateways, not direct
+    # Anthropic.
+    if resolved_key and resolved_base and not routed_to_ollama:
         import asyncio as _asyncio
         effective_user = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
         raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
@@ -313,17 +371,10 @@ async def _call_llm(
             return (resp.json()["choices"][0]["message"]["content"] or "").strip()
         resp.raise_for_status()  # final attempt exhausted
 
-    kwargs: Dict[str, Any] = {
-        "model": resolved_model,
-        "messages": build_messages(
-            system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
-        ),
-        "api_base": resolved_base,
-        "api_key": resolved_key,
-        "timeout": config.LLM_TIMEOUT,
-        "temperature": temperature,
-        "num_retries": config.SIFT_LLM_NUM_RETRIES,
-    }
+    kwargs["messages"] = build_messages(
+        system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
+    )
+    kwargs["temperature"] = temperature
     if reasoning_effort:
         # Anthropic requires temperature=1 with thinking, and max_tokens must exceed the
         # thinking budget (4096 for "high"). 16000 gives ~12k for text output after the
@@ -332,23 +383,14 @@ async def _call_llm(
         kwargs["temperature"] = 1.0
         kwargs["max_tokens"] = 16000
     import asyncio as _asyncio
-    last_exc: Optional[Exception] = None
+    # Exceptions are retried inside LiteLLM (num_retries); this loop only covers what LiteLLM
+    # can't see — an empty body with an error/length finish_reason (LiteLLM maps upstream
+    # 'error' to 'stop'), which is a transient upstream failure.
     for attempt in range(3):
-        try:
-            response = await acompletion(**kwargs)
-        except Exception as e:
-            last_exc = e
-            if attempt == 2:
-                raise
-            wait = 2 ** attempt
-            logger.debug("acompletion error (%s), retrying in %ss", e, wait)
-            await _asyncio.sleep(wait)
-            continue
+        response = await acompletion(**kwargs)
         record_response(resolved_model, response)
         finish = getattr(response.choices[0], "finish_reason", None)
         content = response.choices[0].message.content or ""
-        # LiteLLM maps upstream 'error' finish_reason to 'stop'; an empty body
-        # with an error/length finish_reason is a transient upstream failure.
         if not content.strip() and finish in ("error", "length") and attempt < 2:
             wait = 2 ** attempt
             logger.debug(
@@ -358,8 +400,6 @@ async def _call_llm(
             await _asyncio.sleep(wait)
             continue
         return content.strip()
-    if last_exc:
-        raise last_exc
     return ""
 
 

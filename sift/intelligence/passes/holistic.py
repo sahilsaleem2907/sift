@@ -420,6 +420,12 @@ async def review_holistic(
     _ = plan
     _ = cap
     if _should_skip_holistic(digest):
+        logger.info(
+            "[holistic] skipped: import_edges=%d, files with changed functions=%d "
+            "(needs PR-internal imports across 2+ changed files)",
+            len(digest.import_edges),
+            len({cf["path"] for cf in digest.changed_functions}),
+        )
         return []
 
     user_content = _format_digest(digest)

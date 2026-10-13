@@ -12,7 +12,11 @@ app = build_app()
 
 def _log_review_config() -> None:
     """Log resolved review models and effort plan at startup (no secrets)."""
-    from sift.intelligence.capability import primary_capability, review_capability
+    from sift.intelligence.capability import (
+        is_ollama_endpoint,
+        primary_capability,
+        review_capability,
+    )
     from sift.intelligence.effort import current_plan, resolve_effort
 
     effort = resolve_effort()
@@ -57,18 +61,31 @@ def _log_review_config() -> None:
 
     prim = primary_capability()
     logger.info(
-        "Sift capability primary: ctx=%d fn_calling=%s reasoning=%s",
+        "Sift capability primary: ctx=%d fn_calling=%s reasoning=%s ollama=%s",
         prim.context_window,
         prim.supports_function_calling,
         prim.supports_reasoning,
+        is_ollama_endpoint(config.LLM_MODEL, config.LLM_API_BASE, config.LLM_API_KEY),
     )
+    if plan.enable_agentic and not prim.supports_function_calling:
+        logger.warning(
+            "Sift pipeline: agentic review is enabled but %s reports no tool calling — "
+            "every file will use the one-shot review. Set SIFT_CAPABILITY_OVERRIDE "
+            '(e.g. {"supports_function_calling": true}) if the model does support tools.',
+            config.LLM_MODEL,
+        )
     if dedicated_critic:
         rev = review_capability()
         logger.info(
-            "Sift capability critic: ctx=%d fn_calling=%s reasoning=%s",
+            "Sift capability critic: ctx=%d fn_calling=%s reasoning=%s ollama=%s",
             rev.context_window,
             rev.supports_function_calling,
             rev.supports_reasoning,
+            is_ollama_endpoint(
+                critic_model,
+                config.SIFT_REVIEW_MODEL_BASE_URL or config.LLM_API_BASE,
+                config.SIFT_REVIEW_MODEL_KEY or config.LLM_API_KEY,
+            ),
         )
 
     if config.VECTOR_DB_ENABLED:

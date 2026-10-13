@@ -21,7 +21,9 @@ from sift.intelligence.llm_client import (
     _items_to_comments,
     _parse_review_file_response,
     cache_control_block,
+    ignores_tool_choice,
     is_anthropic_direct,
+    litellm_kwargs,
     parse_with_repair,
 )
 from sift.observability.cost import record_response
@@ -323,32 +325,24 @@ def _message_to_dict(msg: Any) -> dict[str, Any]:
     return out
 
 
+def _primary_kwargs() -> dict[str, Any]:
+    return litellm_kwargs(config.LLM_MODEL, config.LLM_API_BASE, config.LLM_API_KEY)
+
+
 async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
     kwargs: dict[str, Any] = {
-        "model": config.LLM_MODEL,
+        **_primary_kwargs(),
         "messages": messages,
         "tools": TOOLS,
         "tool_choice": "auto",
-        "api_base": config.LLM_API_BASE or None,
-        "api_key": config.LLM_API_KEY or None,
-        "timeout": 120.0,
-        "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }
     # LiteLLM maps upstream 'error' finish_reason to 'stop' with empty content and
     # no tool_calls; without this guard the loop silently treats that as "no
     # findings". Log the raw response, retry with backoff, then raise so the
-    # caller falls back to a deterministic review.
+    # caller falls back to a deterministic review. Exceptions are already retried
+    # inside LiteLLM (num_retries), so they propagate straight to the caller.
     for attempt in range(3):
-        try:
-            response = await acompletion(**kwargs)
-        except Exception as e:
-            if attempt == 2:
-                raise
-            logger.warning(
-                "[agentic] tool call errored (%s), retry %d/2", e, attempt + 1
-            )
-            await asyncio.sleep(2 ** attempt)
-            continue
+        response = await acompletion(**kwargs)
         choice = response.choices[0]
         finish = getattr(choice, "finish_reason", None)
         msg = getattr(choice, "message", None)
@@ -368,47 +362,53 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
     raise RuntimeError("agentic step failed: retries exhausted")
 
 
+_FINAL_TEXT_INSTRUCTION = (
+    "Step limit reached. Respond now with your final findings as the JSON array described in "
+    "your instructions (use [] if there are none). Do not call any tools."
+)
+
+
 async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
-    # messages still carries the loop's tool_calls/tool results, so tools= must stay declared
-    # (direct Anthropic rejects tool history without it). tool_choice="none" forces a text
-    # answer instead of another tool call now that the step budget is spent.
     kwargs: dict[str, Any] = {
-        "model": config.LLM_MODEL,
-        "messages": messages,
-        "tools": TOOLS,
-        "tool_choice": "none",
-        "api_base": config.LLM_API_BASE or None,
-        "api_key": config.LLM_API_KEY or None,
-        "timeout": 120.0,
-        "num_retries": config.SIFT_LLM_NUM_RETRIES,
+        **_primary_kwargs(),
+        "messages": messages + [{"role": "user", "content": _FINAL_TEXT_INSTRUCTION}],
     }
+    if not ignores_tool_choice(config.LLM_MODEL, config.LLM_API_BASE):
+        # messages still carries the loop's tool_calls/tool results, so tools= must stay
+        # declared (direct Anthropic rejects tool history without it). tool_choice="none"
+        # forces a text answer instead of another tool call.
+        kwargs["tools"] = TOOLS
+        kwargs["tool_choice"] = "none"
+    # Otherwise (Ollama) tool_choice is ignored, and the model keeps calling tools it saw in
+    # history even when only emit_findings is declared — sending no tools at all is the only
+    # reliable way to get a text answer there.
     response = await acompletion(**kwargs)
     record_response(config.LLM_MODEL, response)
     return (response.choices[0].message.content or "").strip()
 
 
 async def _emit_findings_final(messages: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
-    """Force the model to submit findings via the emit_findings tool.
+    """Ask the model to submit findings via the emit_findings tool.
 
     Deterministic: the response is schema-constrained JSON in the tool-call
     arguments, so there is no free text to heuristically parse. Forcing a specific
     tool is safe here only because the agentic loop sends no reasoning_effort —
     Anthropic forbids a forced tool_choice under extended thinking. If reasoning is
-    ever enabled on this path, this call must be gated.
+    ever enabled on this path, this call must be gated. Endpoints that ignore
+    tool_choice (Ollama) may answer with another tool call instead; that raises so
+    the caller falls through to the no-tools text path.
     """
     emit_messages = messages + [{
         "role": "user",
         "content": "Step limit reached. Submit your findings now by calling emit_findings.",
     }]
     kwargs: dict[str, Any] = {
-        "model": config.LLM_MODEL,
+        **_primary_kwargs(),
         "messages": emit_messages,
         # Prior read-tool calls remain in history, so their definitions must stay
         # declared alongside emit_findings (direct-Anthropic requirement).
         "tools": TOOLS + [EMIT_FINDINGS_TOOL],
         "tool_choice": {"type": "function", "function": {"name": "emit_findings"}},
-        "api_base": config.LLM_API_BASE or None,
-        "timeout": 120.0,
     }
     response = await acompletion(**kwargs)
     record_response(config.LLM_MODEL, response)
@@ -421,9 +421,8 @@ async def _emit_findings_final(messages: list[dict[str, Any]], path: str) -> lis
             if isinstance(findings, list):
                 return _items_to_comments(findings, path)
             return []
-    # Forced tool_choice should guarantee the call; treat its absence as a failure
-    # so the caller falls through to the free-text repair path.
-    raise RuntimeError("emit_findings not returned despite forced tool_choice")
+    returned = [getattr(getattr(tc, "function", None), "name", "?") for tc in tool_calls]
+    raise RuntimeError(f"emit_findings not returned (got tool calls: {returned or 'none'})")
 
 
 async def _final_comments(
@@ -431,16 +430,18 @@ async def _final_comments(
 ) -> list[dict[str, Any]]:
     """Produce the final findings as comment dicts, deterministically when possible.
 
-    Tier 1: force the emit_findings tool (schema-constrained JSON, always parseable).
-    Tier 2: for models that can't force a tool (or if the forced call errors), fall
-    back to the free-text final call routed through parse_with_repair.
+    Tier 1: ask for the emit_findings tool (schema-constrained JSON, always parseable).
+    Tier 2: for models that can't call tools, or if tier 1 doesn't return emit_findings,
+    fall back to a free-text final call routed through parse_with_repair.
     """
     if cap.supports_function_calling:
         try:
-            return await _emit_findings_final(messages, path)
+            comments = await _emit_findings_final(messages, path)
+            logger.info("[agentic] %s: emit_findings returned %d finding(s)", path, len(comments))
+            return comments
         except Exception as e:
             logger.warning(
-                "[agentic] %s: forced emit_findings failed (%s); free-text fallback",
+                "[agentic] %s: emit_findings failed (%s); free-text final answer",
                 path, e,
             )
     raw = await _call_llm_final(messages)
@@ -448,7 +449,9 @@ async def _final_comments(
     async def _recall(repair_prompt: str) -> str:
         return await _call_llm(REVIEW_FILE_SYSTEM, repair_prompt)
 
-    return await parse_with_repair(raw, path, _recall)
+    comments = await parse_with_repair(raw, path, _recall)
+    logger.info("[agentic] %s: free-text final answer gave %d finding(s)", path, len(comments))
+    return comments
 
 
 def _comments_to_findings(comments: list[dict[str, Any]], path: str) -> list[Finding]:
@@ -539,6 +542,10 @@ async def agentic_review(
                 comments = _parse_review_file_response(content, path)
                 if not comments and content.strip() and _extract_json_array(content) is None:
                     comments = await _final_comments(messages, path, cap)
+                logger.info(
+                    "[agentic] %s: answered after %d step(s) with %d finding(s)",
+                    path, step + 1, len(comments),
+                )
                 return _comments_to_findings(comments, path)
 
             for tc in tool_calls:
@@ -555,11 +562,16 @@ async def agentic_review(
                         "content": result,
                     }
                 )
-            logger.debug("[agentic] %s: step %d tool call(s)", path, step + 1)
+            logger.info(
+                "[agentic] %s: step %d/%d: %d tool call(s) %s",
+                path, step + 1, max_steps, len(tool_calls),
+                [(tc.get("function") or {}).get("name") for tc in tool_calls],
+            )
 
-        # Budget exhausted: get the final answer deterministically (forced emit tool
-        # when supported; free-text + repair otherwise). _final_comments appends its
-        # own "submit now" instruction, so no extra prompt is needed here.
+        # Budget exhausted: get the final answer deterministically (emit tool when
+        # supported; free-text + repair otherwise). Each tier appends its own "submit
+        # now" instruction, so no extra prompt is needed here.
+        logger.info("[agentic] %s: step budget (%d) exhausted, requesting final answer", path, max_steps)
         comments = await _final_comments(messages, path, cap)
         return _comments_to_findings(comments, path)
 

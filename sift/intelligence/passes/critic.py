@@ -13,7 +13,9 @@ from sift.intelligence.llm_client import (
     _call_llm,
     _extract_json_array,
     cache_control_block,
+    ignores_tool_choice,
     is_anthropic_direct,
+    litellm_kwargs,
 )
 from sift.intelligence.prompts import CRITIC_BATCHED_SYSTEM, CRITIC_FINDING_SYSTEM
 from sift.intelligence.schema import Certainty, Finding, Impact
@@ -206,15 +208,11 @@ async def _acompletion_with_tools(
     from sift.intelligence.passes.agentic import TOOLS
 
     kwargs: dict[str, Any] = {
-        "model": llm_kw["model"],
+        **litellm_kwargs(llm_kw["model"], llm_kw.get("api_base"), llm_kw.get("api_key")),
         "messages": messages,
         "tools": TOOLS,
         "tool_choice": "auto",
-        "api_base": llm_kw.get("api_base"),
-        "timeout": 120.0,
     }
-    if llm_kw.get("api_key"):
-        kwargs["api_key"] = llm_kw["api_key"]
     if reasoning_effort:
         # No temperature is set here, so Anthropic's default (1.0) already satisfies the
         # thinking constraint; max_tokens must exceed the thinking budget (4096 for "high").
@@ -266,14 +264,19 @@ async def _critique_with_tools(
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
-    for _ in range(_CRITIC_TOOL_MAX_STEPS):
+    for step in range(_CRITIC_TOOL_MAX_STEPS):
         resp = await _acompletion_with_tools(messages, llm_kw, reasoning_effort=reasoning_effort)
         msg = resp.choices[0].message
         md = _message_to_dict(msg)
         messages.append(md)
         tool_calls = md.get("tool_calls") or []
         if not tool_calls:
+            logger.info("[critic] tool loop answered after %d step(s)", step + 1)
             return md.get("content") or ""
+        logger.info(
+            "[critic] tool loop step %d/%d: %s", step + 1, _CRITIC_TOOL_MAX_STEPS,
+            [(tc.get("function") or {}).get("name") for tc in tool_calls],
+        )
         for tc in tool_calls:
             fn = tc.get("function") or {}
             name = fn.get("name") or ""
@@ -289,23 +292,24 @@ async def _critique_with_tools(
         "role": "user",
         "content": "Step limit reached. Respond with your final JSON verdict object only (no tool calls).",
     })
-    # messages still carries tool_calls/tool results, so tools= must stay declared (direct
-    # Anthropic rejects tool history without it). tool_choice="none" forces the final verdict
-    # as text now that the step budget is spent.
-    final_kwargs: dict[str, Any] = dict(
-        model=llm_kw["model"],
-        messages=messages,
-        tools=TOOLS,
-        tool_choice="none",
-        api_base=llm_kw.get("api_base"),
-        api_key=llm_kw.get("api_key") or None,
-        timeout=120.0,
-    )
+    final_kwargs: dict[str, Any] = {
+        **litellm_kwargs(llm_kw["model"], llm_kw.get("api_base"), llm_kw.get("api_key")),
+        "messages": messages,
+    }
+    if not ignores_tool_choice(llm_kw["model"], llm_kw.get("api_base")):
+        # messages still carries tool_calls/tool results, so tools= must stay declared (direct
+        # Anthropic rejects tool history without it). tool_choice="none" forces the final
+        # verdict as text now that the step budget is spent.
+        final_kwargs["tools"] = TOOLS
+        final_kwargs["tool_choice"] = "none"
+    # Otherwise (Ollama) tool_choice is ignored, so no tools are sent at all — the only
+    # reliable way to get the text verdict there.
     if reasoning_effort:
         final_kwargs["reasoning_effort"] = reasoning_effort
         final_kwargs["max_tokens"] = 8192
     resp = await acompletion(**final_kwargs)
     record_response(llm_kw["model"], resp)
+    logger.info("[critic] tool loop budget (%d) exhausted, final verdict requested", _CRITIC_TOOL_MAX_STEPS)
     return resp.choices[0].message.content or ""
 
 
