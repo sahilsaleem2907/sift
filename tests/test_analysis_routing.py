@@ -64,31 +64,31 @@ def test_is_test_path_negative(path: str) -> None:
     assert is_test_path(path) is False
 
 
-def test_get_tools_for_file_drops_deep_static_for_tests() -> None:
-    # A CRITICAL-risk code file normally gets linter+semgrep+codeql...
+def test_get_tools_for_file_python_gets_pyright() -> None:
+    # Python files get pyright at any risk level (API-existence bugs aren't risk-correlated).
     prod = get_tools_for_file(FileType.CODE, RiskLevel.CRITICAL, "auth/login.py")
-    assert prod == frozenset({"linter", "semgrep", "codeql"})
-    # ...but as a test file it keeps only the linter.
+    assert prod == frozenset({"linter", "semgrep", "codeql", "pyright"})
+    # Test Python files still get pyright (is_test is not a pyright gate).
     test = get_tools_for_file(
         FileType.CODE, RiskLevel.CRITICAL, "tests/test_login.py", is_test=True
     )
-    assert test == frozenset({"linter"})
+    assert "pyright" in test
 
 
-def test_get_tools_for_file_test_config_drops_semgrep() -> None:
-    # Config MEDIUM+ normally gets semgrep; a test fixture config gets nothing.
+def test_get_tools_for_file_config_gets_semgrep() -> None:
+    # Config MEDIUM+ gets semgrep regardless of is_test.
     prod = get_tools_for_file(FileType.CONFIG, RiskLevel.MEDIUM, "config/app.yaml")
     assert "semgrep" in prod
     test = get_tools_for_file(
         FileType.CONFIG, RiskLevel.MEDIUM, "tests/fixtures/app.yaml", is_test=True
     )
-    assert "semgrep" not in test and "codeql" not in test
+    assert "semgrep" in test and "codeql" not in test
 
 
-def test_get_tools_for_file_low_risk_test_keeps_linter() -> None:
+def test_get_tools_for_file_low_risk_python_keeps_linter_and_pyright() -> None:
     assert get_tools_for_file(
         FileType.CODE, RiskLevel.LOW, "tests/test_util.py", is_test=True
-    ) == frozenset({"linter"})
+    ) == frozenset({"linter", "pyright"})
 
 
 def test_classify_still_treats_test_files_as_code() -> None:

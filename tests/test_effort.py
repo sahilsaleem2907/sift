@@ -11,6 +11,7 @@ def test_plan_for_low():
     assert p.run_holistic is False
     assert p.context_depth == 0
     assert p.enable_agentic is False
+    assert p.reasoning_effort is None
 
 
 def test_plan_for_balanced():
@@ -19,6 +20,7 @@ def test_plan_for_balanced():
     assert p.critic_per_finding is False
     assert p.run_holistic is True
     assert p.context_depth == 1
+    assert p.reasoning_effort == "low"
 
 
 def test_plan_for_high():
@@ -26,6 +28,7 @@ def test_plan_for_high():
     assert p.critic_per_finding is True
     assert p.enable_agentic is True
     assert p.context_depth == 2
+    assert p.reasoning_effort == "high"
 
 
 def test_resolve_effort_valid():

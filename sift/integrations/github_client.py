@@ -57,6 +57,11 @@ class GitHubClient(ForgeProvider):
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {self._token}",
             },
+            # Explicit timeout: httpx defaults to 5s, which large multi-comment review
+            # POSTs (e.g. 20+ inline comments) routinely exceed — GitHub creates the
+            # review but the slow response trips a ReadTimeout, falsely marking the whole
+            # review FAILED after the comments are already posted.
+            timeout=httpx.Timeout(30.0),
         )
         return self
 

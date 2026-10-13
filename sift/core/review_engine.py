@@ -22,6 +22,11 @@ from sift.core.analysis_routing import (
     risk_level,
     score_risk_combined,
 )
+from sift.core.analyzers import run_analyzers
+from sift.core.footguns import detect_footguns, format_footgun_notes
+from sift.observability.cost import track_review
+from sift.core.pyright_runner import run_pyright
+from sift.core.version_detect import CANDIDATE_FILES, detect_targets, target_for_path
 from sift.intelligence.ast.diff_ast import build_diff_ast, get_new_file_plus_line_ranges
 from sift.core.block_policy import evaluate_block_policy
 from sift.core.import_analyzer import resolve_pr_import_graph
@@ -178,6 +183,22 @@ async def run_review(
     pr_number: int,
     before_sha: Optional[str] = None,
 ) -> Optional[List[Finding]]:
+    """Scope per-review token/cost capture (no-op unless SIFT_COST_TRACKING), then run the review.
+
+    On exit this emits one greppable `[cost] review <owner>/<repo> pr=<n> ...` log line — the
+    benchmark scripts pick it up from the server log after each fork completes.
+    """
+    with track_review(f"{owner}/{repo} pr={pr_number}"):
+        return await _run_review_impl(forge_builder, owner, repo, pr_number, before_sha)
+
+
+async def _run_review_impl(
+    forge_builder: Callable[[], ForgeProvider],
+    owner: str,
+    repo: str,
+    pr_number: int,
+    before_sha: Optional[str] = None,
+) -> Optional[List[Finding]]:
     """Run the full review flow: fetch diff, split by file, per-file LLM, summarize, post inline comments + summary, store.
 
     forge_builder is a zero-arg callable that returns a ForgeProvider async context manager.
@@ -257,6 +278,25 @@ async def run_review(
                         if yarn_content:
                             path_to_content["yarn.lock"] = yarn_content
 
+                # Detect the repo's declared target runtime version(s) once (clone-free,
+                # via the GitHub API) so the per-file LLM reviewer is grounded in the true
+                # runtime instead of hallucinating one from its prior.
+                _decl_cache: Dict[str, Optional[str]] = {}
+
+                async def _read_decl(name: str) -> None:
+                    _decl_cache[name] = (
+                        path_to_content.get(name)
+                        or await github.get_file_content(owner, repo, name, commit_id)
+                    )
+
+                await asyncio.gather(*[_read_decl(n) for n in CANDIDATE_FILES])
+                runtime_targets = detect_targets(lambda n: _decl_cache.get(n))
+                if runtime_targets:
+                    logger.debug(
+                        "[version] runtime targets: %s",
+                        {k: v.summary for k, v in runtime_targets.items()},
+                    )
+
                 _labeled_comments_text = format_labeled_comment_examples(
                     get_repo_feedback_comment_examples(repo_full)
                 )
@@ -268,6 +308,7 @@ async def run_review(
                 linter_paths: Set[str] = set()
                 semgrep_paths: Set[str] = set()
                 codeql_paths: Set[str] = set()
+                pyright_paths: Set[str] = set()
 
                 if config.SIFT_SMART_ROUTING_ENABLED:
                     pr_paths = [p for p, _ in file_chunks]
@@ -320,6 +361,8 @@ async def run_review(
                             semgrep_paths.add(path)
                         if "codeql" in tools_set:
                             codeql_paths.add(path)
+                        if "pyright" in tools_set and config.PYRIGHT_ENABLED:
+                            pyright_paths.add(path)
                         tools_str = ",".join(sorted(tools_set)) if tools_set else "SKIP"
                         # Log why this risk level: which factors contributed
                         parts = [f"{k}+{v}" for k, v in breakdown.items() if v > 0]
@@ -488,6 +531,50 @@ async def run_review(
                         return {}
                     return await _run_codeql_task()
 
+                run_pyright_this_pr = config.PYRIGHT_ENABLED and len(pyright_paths) > 0
+                pyright_cache_key: Optional[str] = None
+                if run_pyright_this_pr and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                    pyright_cache_key = hashlib.sha256(
+                        (
+                            "pyright:" + repo_full + ":" + commit_id + ":"
+                            + ",".join(sorted(pyright_paths))
+                        ).encode("utf-8")
+                    ).hexdigest()
+
+                async def _pyright_or_empty() -> Dict[str, List[dict]]:
+                    if not run_pyright_this_pr:
+                        return {}
+
+                    def _run() -> Dict[str, List[dict]]:
+                        if pyright_cache_key and config.TOOL_CACHE_ENABLED and ttl_hours > 0:
+                            hits = get_tool_cache_hits([pyright_cache_key], ttl_hours)
+                            cached = hits.get(pyright_cache_key)
+                            if isinstance(cached, dict):
+                                logger.debug(
+                                    "[Tool cache REUSED] Pyright: using cached results for %s (skipped run)",
+                                    repo_full,
+                                )
+                                return cached
+                        try:
+                            source_root = get_repo_at_commit(owner, repo, commit_id, github.get_clone_token() or "")
+                            result = run_pyright(
+                                source_root,
+                                sorted(pyright_paths),
+                                config.PYRIGHT_TIMEOUT,
+                            )
+                            if pyright_cache_key and config.TOOL_CACHE_ENABLED and result:
+                                store_tool_cache([{
+                                    "cache_key": pyright_cache_key,
+                                    "tool": "pyright",
+                                    "findings_json": json.dumps(result),
+                                }])
+                            return result
+                        except Exception as e:
+                            logger.warning("Pyright skipped: %s", e)
+                            return {}
+
+                    return await asyncio.to_thread(_run)
+
                 async def _semgrep_or_empty() -> Dict[str, List[dict]]:
                     if not run_semgrep_this_pr:
                         return {}
@@ -514,10 +601,11 @@ async def run_review(
                             )
                     return results
 
-                semgrep_result, linter_result, codeql_result = await asyncio.gather(
+                semgrep_result, linter_result, codeql_result, pyright_result = await asyncio.gather(
                     _semgrep_or_empty(),
                     asyncio.to_thread(run_linters, linter_uncached),
                     _codeql_or_empty(),
+                    _pyright_or_empty(),
                     return_exceptions=True,
                 )
 
@@ -562,6 +650,18 @@ async def run_review(
                     codeql_findings_by_path = {}
                 else:
                     codeql_findings_by_path = codeql_result
+
+                if isinstance(pyright_result, BaseException):
+                    logger.warning("Pyright failed: %s", pyright_result)
+                    pyright_findings_by_path: Dict[str, List[dict]] = {}
+                else:
+                    pyright_findings_by_path = pyright_result
+                if pyright_findings_by_path:
+                    logger.debug(
+                        "Pyright (entire repo): %d path(s), %d total finding(s)",
+                        len(pyright_findings_by_path),
+                        sum(len(v) for v in pyright_findings_by_path.values()),
+                    )
 
                 if findings_by_path:
                     total_semgrep = sum(len(v) for v in findings_by_path.values())
@@ -630,12 +730,23 @@ async def run_review(
                     file_chunks, path_to_content, mod_funcs_by_path
                 )
 
+                # Resolve the git checkout root for repo-wide fact-tools — only when the
+                # agentic tool loop will actually run (high effort + fn-calling). The
+                # clone is cached (pyright/codeql reuse it), so this is cheap when warm.
+                repo_root_for_tools: Optional[str] = None
+                if _effort_plan.enable_agentic and _model_cap.supports_function_calling:
+                    try:
+                        repo_root_for_tools = str(get_repo_at_commit(owner, repo, commit_id, github.get_clone_token() or ""))
+                    except Exception as e:
+                        logger.debug("[fact-tools] repo checkout unavailable: %s", e)
+
                 pr_meta_for_files = PRMeta(
                     title=(pr_context or {}).get("title") or "",
                     body=(pr_context or {}).get("body") or "",
                     import_graph=pr_import_graph,
                     mod_funcs_by_path=mod_funcs_by_path,
                     path_to_content=path_to_content,
+                    repo_root=repo_root_for_tools,
                 )
 
                 _review_sem = asyncio.Semaphore(config.SIFT_MAX_CONCURRENT_REVIEWS)
@@ -706,6 +817,14 @@ async def run_review(
                             if f not in codeql_on_diff and (f.get("severity") or "").upper() == "ERROR"
                         ]
                         codeql_for_llm = codeql_on_diff + codeql_critical
+
+                    # Pyright: diff-filtered only (no file-wide bypass). Promoted critic-exempt
+                    # via promote_static_findings; NOT fed to the per-file LLM context to avoid
+                    # a duplicate of the promoted finding.
+                    pyright_for_promote = [
+                        f for f in pyright_findings_by_path.get(path0, [])
+                        if f.get("line") in diff_lines
+                    ]
                     if config.SIFT_SMART_ROUTING_ENABLED:
                         logger.debug(
                             "[Smart routing] LLM context for %s: linter=%s semgrep=%s codeql=%s",
@@ -782,10 +901,34 @@ async def run_review(
                         )
                     semgrep_for_llm = semgrep_for_llm + builtin_secret_findings
 
+                    analyzer_for_promote = (
+                        run_analyzers(path0, file_content, file_diff)
+                        if config.ANALYZERS_ENABLED
+                        else []
+                    )
+                    if analyzer_for_promote:
+                        logger.debug(
+                            "[analyzer] %s: %d verdict finding(s) on changed lines",
+                            path0, len(analyzer_for_promote),
+                        )
+
+                    # Curated external-API footgun notes for stdlib/framework gotchas
+                    # the repo tools can't see (see src/core/footguns.py).
+                    footgun_notes = detect_footguns(path0, file_diff, file_content)
+                    external_api_notes = format_footgun_notes(footgun_notes)
+                    if footgun_notes:
+                        logger.debug("[footguns] %s: %d note(s) injected", path0, len(footgun_notes))
+
                     file_pr_context = {
                         **(pr_context or {}),
                         "semgrep_findings": semgrep_for_llm,
                         "codeql_findings": codeql_for_llm,
+                        "external_api_notes": external_api_notes or None,
+                        "pyright_findings": pyright_for_promote,
+                        "analyzer_findings": analyzer_for_promote,
+                        "runtime_target": (
+                            rt.summary if (rt := target_for_path(path0, runtime_targets)) else None
+                        ),
                         "linter_issues": linter_issues_with_snippets,
                         "file_context": {
                             "path": path0,
@@ -904,6 +1047,7 @@ async def run_review(
                     mod_funcs_by_path=mod_funcs_by_path,
                     raw_diffs={p: fd for p, fd in file_chunks if fd.strip()},
                     path_to_content=path_to_content,
+                    repo_root=repo_root_for_tools,
                 )
                 try:
                     all_findings = await run_pipeline_holistic(
@@ -951,18 +1095,33 @@ async def run_review(
                 # One comment per (path, line); merge multiple into bullet points
                 collected = _merge_comments_by_line(collected)
 
-                collected = [
+                # GitHub inline comments must land on a '+' diff line. Findings
+                # off the diff (holistic / cross-file) can't post inline, but they
+                # are still real findings — route them into the summary comment so
+                # they remain visible (and scorable) instead of being dropped.
+                on_diff = [
                     c
                     for c in collected
                     if c["line"] in diff_lines_per_path.get(c["path"], set())
                 ]
-                all_comments = list(collected)
+                off_diff = [
+                    c
+                    for c in collected
+                    if c["line"] not in diff_lines_per_path.get(c["path"], set())
+                ]
+                for c in off_diff:
+                    logger.info(
+                        "Finding off the diff (routed to summary, not inline): %s:%s",
+                        c.get("path"),
+                        c.get("line"),
+                    )
+                all_comments = on_diff + off_diff
                 inline_comments = [
-                    c for c in collected if c.get("post_inline", True)
+                    c for c in on_diff if c.get("post_inline", True)
                 ]
                 summary = (
-                    await summarize_review(inline_comments)
-                    if inline_comments
+                    await summarize_review(inline_comments, off_diff)
+                    if (inline_comments or off_diff)
                     else "Sifted through the code and found no issues."
                 )
                 if not summary.strip():

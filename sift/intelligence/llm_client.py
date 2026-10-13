@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
@@ -14,9 +14,63 @@ litellm.suppress_debug_info = True
 
 from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
-from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, TEST_FILE_APPENDIX
+from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, REVIEW_FILE_SYSTEM_EXTENDED_THINKING, TEST_FILE_APPENDIX
+from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
+
+
+def is_anthropic_direct(model: str) -> bool:
+    """True for direct Anthropic model ids that route through LiteLLM's Anthropic provider,
+    where cache_control content blocks are honored. Excludes 'openrouter/anthropic/...'
+    (that routes via OpenRouter / the raw-httpx path, where we keep plain string messages)."""
+    m = (model or "").lower()
+    return m.startswith("anthropic/") or m.startswith("claude-")
+
+
+def cache_control_block(text: str, ttl: str) -> List[Dict[str, Any]]:
+    """A single text content block marked for ephemeral prompt caching (Anthropic)."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral", "ttl": ttl}}]
+
+
+def build_messages(
+    system: str,
+    user_content: str,
+    model: str,
+    *,
+    cache_user_prefix: Optional[str] = None,
+    system_ttl: str = "1h",
+    prefix_ttl: str = "1h",
+) -> List[Dict[str, Any]]:
+    """Build the LiteLLM messages list.
+
+    For direct Anthropic models, wrap the (stable) system prompt — and an optional shared
+    user prefix — in cache_control content blocks so repeated calls reuse the cached prefix.
+    A breakpoint on the user prefix block caches everything before it (system + prefix). The
+    text is byte-identical to the plain-string form, so model outputs are unchanged.
+
+    For every other provider, return plain string messages (unchanged behavior).
+    """
+    if not is_anthropic_direct(model):
+        content = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": cache_control_block(system, system_ttl)}
+    ]
+    if cache_user_prefix is None:
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": cache_control_block(cache_user_prefix, prefix_ttl)
+                + [{"type": "text", "text": user_content}],
+            }
+        )
+    return messages
 
 # Match severity badge at start of comment body (text or shields.io image).
 _SUMMARY_SEVERITY_RE = re.compile(
@@ -91,11 +145,64 @@ def _parse_issues_from_comment_body(text: str) -> List[tuple[str, str]]:
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 
 
+_HASH = "#"
+_SLASH = "//"
+_DASH = "--"
+# Correct inline line-comment token per extension, so the injected [L<n>] marker is VALID syntax
+# in the file's language. Covers every language Sift reviews or lints (kept aligned with
+# language_registry._EXTENSION_TO_LANG_KEY, analysis_routing, linter_runner). A `None` value —
+# and any extension not listed — means the format has no safe inline line-comment (JSON, CSS,
+# markup, docs, unknown), so a leading [L<n>] gutter is used instead of an inline comment.
+_COMMENT_MARKER_BY_EXT = {
+    # hash-comment languages
+    ".py": _HASH, ".pyw": _HASH, ".pyi": _HASH,
+    ".rb": _HASH, ".sh": _HASH, ".bash": _HASH, ".zsh": _HASH, ".ps1": _HASH,
+    ".yml": _HASH, ".yaml": _HASH, ".env": _HASH,
+    ".tf": _HASH, ".tfvars": _HASH, ".toml": _HASH, ".ini": _HASH,
+    ".cfg": _HASH, ".conf": _HASH, ".properties": _HASH,
+    # C-style languages
+    ".js": _SLASH, ".mjs": _SLASH, ".cjs": _SLASH, ".jsx": _SLASH,
+    ".ts": _SLASH, ".tsx": _SLASH,
+    ".go": _SLASH, ".rs": _SLASH, ".java": _SLASH,
+    ".c": _SLASH, ".h": _SLASH, ".cc": _SLASH, ".cpp": _SLASH, ".cxx": _SLASH,
+    ".hpp": _SLASH, ".hh": _SLASH,
+    ".cs": _SLASH, ".php": _SLASH, ".swift": _SLASH,
+    ".kt": _SLASH, ".kts": _SLASH, ".scala": _SLASH,
+    ".scss": _SLASH, ".sass": _SLASH, ".less": _SLASH,
+    ".dart": _SLASH, ".groovy": _SLASH,
+    # dash-comment languages
+    ".lua": _DASH, ".hs": _DASH, ".sql": _DASH,
+    # no safe inline line-comment => leading [L<n>] gutter (explicit for readability)
+    ".json": None, ".css": None,
+    ".html": None, ".htm": None, ".xml": None, ".svg": None, ".vue": None, ".erb": None,
+    ".md": None, ".markdown": None, ".rst": None, ".adoc": None, ".txt": None,
+}
+_HASH_FILENAMES = {"Dockerfile", ".dockerignore", ".gitignore", "Makefile"}
+
+
+def _line_comment_token(path: str) -> Optional[str]:
+    """Inline line-comment token for `path`'s language, or None => use a leading gutter marker.
+
+    Covers every language Sift reviews or lints; unknown extensions return None so we never
+    inject a guessed (and possibly invalid) comment token that the model would flag as a bug.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name in _HASH_FILENAMES or name.endswith(".dockerfile"):
+        return _HASH
+    dot = name.rfind(".")
+    ext = name[dot:].lower() if dot > 0 else ""
+    return _COMMENT_MARKER_BY_EXT.get(ext)  # missing => None (gutter): the safe default
+
+
 def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
-    """Append [L<n>] to each '+' line in the diff so the LLM can cite exact new-file line numbers."""
+    """Append a [L<n>] line-number marker to each '+' line so the LLM can cite exact new-file
+    lines. The marker uses the language's real comment token ('#', '//', '--'); for formats with
+    no safe inline comment (JSON/CSS/markup/unknown) it becomes a leading [L<n>] gutter instead,
+    so we never inject invalid syntax the model would (correctly) flag as a bug on its own input.
+    """
     if not diff_chunk or not diff_chunk.strip():
         return diff_chunk
-    comment_marker = "  # " if (path.endswith(".py") or ".py/" in path) else "  // "
+    token = _line_comment_token(path)
     lines_out: List[str] = []
     current_new_line: Optional[int] = None
     for line in diff_chunk.splitlines():
@@ -115,13 +222,80 @@ def _annotate_diff_with_line_numbers(diff_chunk: str, path: str) -> str:
             current_new_line += 1
             lines_out.append(line)
         elif prefix == "+" and not line.startswith("+++"):
-            lines_out.append(line + comment_marker + f"[L{current_new_line}]")
+            if token is None:
+                # No safe inline comment for this language (JSON/CSS/markup/unknown): put the
+                # marker in a leading gutter, which reads as presentation rather than code, so
+                # the model doesn't flag it as invalid syntax.
+                lines_out.append("+" + f"[L{current_new_line}] " + line[1:])
+            else:
+                lines_out.append(line + "  " + token + f" [L{current_new_line}]")
             current_new_line += 1
         elif prefix == "-" and not line.startswith("---"):
             lines_out.append(line)
         else:
             lines_out.append(line)
     return "\n".join(lines_out)
+
+
+def resolve_api_key(
+    model: str, api_base: Optional[str], api_key: Optional[str] = None
+) -> Optional[str]:
+    """Explicit key wins; otherwise inherit LLM_API_KEY only for the primary model or a call
+    sharing its base URL — a critic on a different provider must not be sent the primary key."""
+    shares_primary = model == config.LLM_MODEL or (
+        api_base is not None and api_base == config.LLM_API_BASE
+    )
+    return api_key or (config.LLM_API_KEY if shares_primary else None) or None
+
+
+def litellm_kwargs(
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Routing/auth/retry kwargs shared by every LiteLLM ``acompletion`` call.
+
+    Resolves model/base/key the same way for the generator, agentic loop, critic and
+    holistic. An Ollama endpoint (detected via its ``/api/show``) is called through
+    Ollama's OpenAI-compatible ``/v1`` API: LiteLLM's model map doesn't know Ollama model
+    ids (a bare id has no provider at all), and its native ``ollama_chat`` route mangles
+    tool-call history. ``openai/`` here selects the request *format*, not the model vendor.
+    Exceptions (429/5xx/timeouts) are retried by LiteLLM itself via ``num_retries``.
+    """
+    from sift.intelligence.capability import is_ollama_endpoint, ollama_model_name
+
+    resolved_model = model or config.LLM_MODEL
+    resolved_base = api_base or config.LLM_API_BASE or None
+    resolved_key = resolve_api_key(resolved_model, resolved_base, api_key)
+    kwargs: Dict[str, Any] = {
+        "model": resolved_model,
+        "api_base": resolved_base,
+        "api_key": resolved_key,
+        "timeout": config.LLM_TIMEOUT,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
+    }
+    if resolved_base and is_ollama_endpoint(resolved_model, resolved_base, resolved_key):
+        base = resolved_base.rstrip("/")
+        kwargs["model"] = f"openai/{ollama_model_name(resolved_model)}"
+        kwargs["api_base"] = base if base.endswith("/v1") else f"{base}/v1"
+        # The OpenAI client refuses to send without a key; local Ollama ignores it.
+        kwargs["api_key"] = resolved_key or "ollama"
+        # LiteLLM rejects reasoning_effort for models it doesn't know; Ollama accepts it.
+        kwargs["allowed_openai_params"] = ["reasoning_effort"]
+    return kwargs
+
+
+def ignores_tool_choice(model: Optional[str] = None, api_base: Optional[str] = None) -> bool:
+    """True when the endpoint ignores ``tool_choice`` (Ollama, on both its native and /v1 APIs).
+
+    Forced-tool and tool_choice="none" calls are then only a hint, so final-answer steps must
+    not rely on them.
+    """
+    from sift.intelligence.capability import is_ollama_endpoint
+
+    resolved_model = model or config.LLM_MODEL
+    resolved_base = api_base or config.LLM_API_BASE or None
+    return bool(resolved_base) and is_ollama_endpoint(resolved_model, resolved_base)
 
 
 async def _call_llm(
@@ -131,21 +305,33 @@ async def _call_llm(
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
     temperature: float = 0.0,
+    cache_user_prefix: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
-    """Call configured LLM provider; return assistant message content or empty string."""
-    resolved_base = api_base or config.LLM_API_BASE or None
-    resolved_model = model or config.LLM_MODEL
-    # Inherit LLM_API_KEY only for the primary model or a call sharing its base URL —
-    # a critic on a different provider must not be sent the primary provider's key.
-    shares_primary = resolved_model == config.LLM_MODEL or (
-        resolved_base is not None and resolved_base == config.LLM_API_BASE
-    )
-    resolved_key = api_key or (config.LLM_API_KEY if shares_primary else None) or None
+    """Call configured LLM provider; return assistant message content or empty string.
 
-    # When both a custom base and key are provided, call the OpenAI-compatible endpoint
-    # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth.
-    if resolved_key and resolved_base:
+    ``cache_user_prefix``: shared user-message text placed before ``user_content``. For direct
+    Anthropic models it becomes a cached content block (so repeated calls that share this prefix
+    reuse it); for other providers it is concatenated ahead of ``user_content`` (same text).
+
+    ``reasoning_effort``: when set (e.g. "low"/"high"), request model reasoning on the LiteLLM
+    path. Anthropic rejects temperature != 1 with thinking enabled and needs headroom above the
+    thinking budget, so we force temperature=1 and a larger max_tokens on those calls. Only the
+    LiteLLM path honours it; the OpenAI-compatible gateway branch below ignores it.
+    """
+    kwargs: Dict[str, Any] = litellm_kwargs(model, api_base, api_key)
+    resolved_model = model or config.LLM_MODEL
+    resolved_base = kwargs["api_base"]
+    resolved_key = kwargs["api_key"]
+    routed_to_ollama = "allowed_openai_params" in kwargs
+
+    # When both a custom base and key are provided (and it isn't Ollama, which goes through
+    # LiteLLM above), call the OpenAI-compatible endpoint directly. This path keeps plain
+    # string messages (no Anthropic cache_control): it's for OpenRouter/gateways, not direct
+    # Anthropic.
+    if resolved_key and resolved_base and not routed_to_ollama:
         import asyncio as _asyncio
+        effective_user = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
         raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
         base = resolved_base.rstrip("/")
         if not base.endswith("/v1"):
@@ -155,37 +341,66 @@ async def _call_llm(
             "model": raw_model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": effective_user},
             ],
             "temperature": temperature,
         }
         headers = {"Authorization": f"Bearer {resolved_key}"}
         for attempt in range(5):
-            async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code == 429:
+            try:
+                async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+            except httpx.RequestError as e:
+                # Connection/timeout — transient, back off and retry.
+                if attempt == 4:
+                    raise
                 wait = 2 ** attempt
-                logger.debug("429 rate-limit, retrying in %ss", wait)
+                logger.debug("LLM transport error (%s), retrying in %ss", e, wait)
                 await _asyncio.sleep(wait)
                 continue
+            # Retry on rate-limit and any 5xx (transient upstream failures).
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < 4:
+                    wait = 2 ** attempt
+                    logger.debug(
+                        "LLM %s, retrying in %ss", resp.status_code, wait
+                    )
+                    await _asyncio.sleep(wait)
+                    continue
             resp.raise_for_status()
             return (resp.json()["choices"][0]["message"]["content"] or "").strip()
         resp.raise_for_status()  # final attempt exhausted
 
-    kwargs: Dict[str, Any] = {
-        "model": resolved_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
-        "api_base": resolved_base,
-        "api_key": resolved_key,
-        "timeout": config.LLM_TIMEOUT,
-        "temperature": temperature,
-        "num_retries": config.SIFT_LLM_NUM_RETRIES,
-    }
-    response = await acompletion(**kwargs)
-    return (response.choices[0].message.content or "").strip()
+    kwargs["messages"] = build_messages(
+        system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
+    )
+    kwargs["temperature"] = temperature
+    if reasoning_effort:
+        # Anthropic requires temperature=1 with thinking, and max_tokens must exceed the
+        # thinking budget (4096 for "high"). 16000 gives ~12k for text output after the
+        # thinking budget — 8192 was too tight when the model also wrote visible reasoning.
+        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["temperature"] = 1.0
+        kwargs["max_tokens"] = 16000
+    import asyncio as _asyncio
+    # Exceptions are retried inside LiteLLM (num_retries); this loop only covers what LiteLLM
+    # can't see — an empty body with an error/length finish_reason (LiteLLM maps upstream
+    # 'error' to 'stop'), which is a transient upstream failure.
+    for attempt in range(3):
+        response = await acompletion(**kwargs)
+        record_response(resolved_model, response)
+        finish = getattr(response.choices[0], "finish_reason", None)
+        content = response.choices[0].message.content or ""
+        if not content.strip() and finish in ("error", "length") and attempt < 2:
+            wait = 2 ** attempt
+            logger.debug(
+                "acompletion finish_reason=%s with empty content, retrying in %ss",
+                finish, wait,
+            )
+            await _asyncio.sleep(wait)
+            continue
+        return content.strip()
+    return ""
 
 
 # Match line-number references so we can parse LLM output. Supports:
@@ -206,6 +421,11 @@ def _strip_thinking_blocks(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Unclosed opening tag (model wrote reasoning then stopped / was truncated
+    # before emitting the closing tag and the JSON). Strip from the tag to EOF so
+    # any JSON that *did* survive before it is still recoverable; if nothing
+    # survives, the caller sees empty and triggers the repair path.
+    text = re.sub(r"<(?:think|thinking|reasoning)>.*\Z", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
 
@@ -346,11 +566,11 @@ def _balanced_array_end(text: str, start: int) -> int:
 def _extract_json_array(raw: str) -> Optional[List[Any]]:
     """Extract a JSON array from raw LLM output.
 
-    Robust against reasoning models: first strips <think>/<thinking>/<reasoning>
+    Robust against reasoning models: strips closed <think>/<thinking>/<reasoning>
     blocks, then tries each '[' as a candidate start and returns the first
-    balanced slice that parses as a JSON *list*. This survives prose that
-    contains stray brackets (e.g. "[L10]" line references), markdown fences, and
-    leading commentary before the real array.
+    balanced slice that parses as a JSON *list*. If stripping leaves nothing
+    useful (e.g. the model embedded JSON inside an unclosed reasoning block),
+    falls back to scanning the original raw text so the JSON is still found.
 
     Returns None when no list can be extracted. Callers should WARNING-log when
     the raw input was non-empty but this returns None — that signals a parse
@@ -373,6 +593,59 @@ def _extract_json_array(raw: str) -> Optional[List[Any]]:
         search_from = start + 1
 
 
+def _items_to_comments(arr: List[Any], path: str) -> List[Dict[str, Any]]:
+    """Convert a list of structured finding items into comment dicts.
+
+    Shared by the freeform review-file parser (after _extract_json_array) and the
+    deterministic forced-tool emit path (agentic), so both apply the identical
+    confidence>=5 filter, body formatting, and field mapping.
+    """
+    out: List[Dict[str, Any]] = []
+    skipped = 0
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_val = item.get("line")
+            line_int = int(line_val) if line_val is not None else None
+        except (TypeError, ValueError):
+            continue
+        if line_int is None or line_int <= 0:
+            continue
+        try:
+            confidence = int(item.get("confidence", 7))
+        except (TypeError, ValueError):
+            confidence = 7
+        logger.debug(
+            "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
+            path, line_int, item.get("severity"), item.get("title"), confidence,
+        )
+        if confidence < 5:
+            skipped += 1
+            logger.debug(
+                "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
+                confidence, path, line_int, item.get("title"),
+            )
+            continue
+        body = _format_structured_comment_body(item)
+        if body.strip():
+            out.append({
+                "line": line_int,
+                "body": body,
+                "post_inline": True,
+                "category": item.get("category"),
+                "severity": (item.get("severity") or "suggestion").lower(),
+                "title": (item.get("title") or "").strip(),
+                "confidence": confidence,
+                "fix": item.get("fix") or None,
+            })
+    logger.debug(
+        "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
+        path, len(arr), len(out), skipped,
+    )
+    return out
+
+
 def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     """Parse LLM response: prefer JSON array; fall back to freeform line-ref regex."""
     if not raw or not raw.strip():
@@ -382,51 +655,15 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     # Try structured JSON first
     arr = _extract_json_array(text)
     if arr is not None and isinstance(arr, list):
-        out: List[Dict[str, Any]] = []
-        skipped = 0
-        for item in arr:
-            if not isinstance(item, dict):
-                continue
-            try:
-                line_val = item.get("line")
-                line_int = int(line_val) if line_val is not None else None
-            except (TypeError, ValueError):
-                continue
-            if line_int is None or line_int <= 0:
-                continue
-            try:
-                confidence = int(item.get("confidence", 7))
-            except (TypeError, ValueError):
-                confidence = 7
-            logger.debug(
-                "LLM finding: file=%s line=%s severity=%s title=%r confidence=%s",
-                path, line_int, item.get("severity"), item.get("title"), confidence,
-            )
-            if confidence < 5:
-                skipped += 1
-                logger.debug(
-                    "LLM finding SKIPPED (confidence=%s < 5): file=%s line=%s title=%r",
-                    confidence, path, line_int, item.get("title"),
-                )
-                continue
-            body = _format_structured_comment_body(item)
-            if body.strip():
-                out.append({
-                    "line": line_int,
-                    "body": body,
-                    "post_inline": True,
-                    "severity": (item.get("severity") or "suggestion").lower(),
-                    "title": (item.get("title") or "").strip(),
-                    "confidence": confidence,
-                    "fix": item.get("fix") or None,
-                })
-        logger.debug(
-            "LLM parse summary for %s: total=%d accepted=%d skipped_low_confidence=%d",
-            path, len(arr), len(out), skipped,
-        )
-        if out:
-            return out
-        logger.debug("JSON array empty or invalid items for %s", path)
+        # A successful JSON parse is authoritative: return it directly even when
+        # empty (no findings, or all items filtered as low-confidence). Only fall
+        # through to the tab/line-ref fallbacks when NO JSON array was extractable
+        # at all (arr is None) — the case those fallbacks were designed for.
+        return _items_to_comments(arr, path)
+
+    # The fallbacks scan the reasoning-stripped text so a "<reasoning>…on line 42…"
+    # sentence can never be mistaken for a finding (fabrication hazard).
+    text = _strip_thinking_blocks(text)
 
     # Fallback 1: tab-separated format "[L<n>]\t<severity>\t<title>\t<body>"
     # Some models (e.g. qwen3-coder-next) emit this instead of JSON.
@@ -499,6 +736,61 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
             "fix": None,
         })
     return out
+
+
+_JSON_REPAIR_INSTRUCTION = (
+    "Your previous response contained analysis but no valid JSON array, so it "
+    "could not be used. Output ONLY the JSON array of findings for the analysis "
+    "below — no reasoning, no prose, no markdown fences. If there are no real "
+    "issues, output []. Each element must have keys: line (an integer from a "
+    "[L<n>] marker in the diff), severity, title, body, optional fix, "
+    "confidence (1-10).\n\nYour previous response:\n"
+)
+
+
+async def _repair_and_parse(
+    raw: str,
+    path: str,
+    recall: Callable[[str], Awaitable[str]],
+) -> List[Dict[str, Any]]:
+    """Ask the model once to re-emit just the JSON array, then re-parse.
+
+    Used when a response had substantial content but yielded no findings via any
+    parser (a parse failure, not a genuine empty result). `recall` takes the
+    repair prompt and returns raw model output.
+    """
+    if not raw or len(raw.strip()) < 40:
+        return []
+    try:
+        repaired = await recall(_JSON_REPAIR_INSTRUCTION + raw.strip())
+    except Exception as e:
+        logger.warning("Repair call failed for %s: %s", path, e)
+        return []
+    if not repaired or not repaired.strip():
+        return []
+    findings = _parse_review_file_response(repaired, path)
+    if findings:
+        logger.info("Repair recovered %d finding(s) for %s", len(findings), path)
+    return findings
+
+
+async def parse_with_repair(
+    raw: str,
+    path: str,
+    recall: Callable[[str], Awaitable[str]],
+) -> List[Dict[str, Any]]:
+    """Parse a review response; on a genuine parse FAILURE, run one repair call.
+
+    Repair fires only when no JSON array was extractable at all (model wrote
+    prose/reasoning and never emitted the array). A correct `[]` or an array of
+    only low-confidence items counts as compliance and is left as-is.
+    """
+    findings = _parse_review_file_response(raw, path)
+    if findings or not raw or not raw.strip():
+        return findings
+    if _extract_json_array(raw) is not None:
+        return findings
+    return await _repair_and_parse(raw, path, recall)
 
 
 def _format_file_context(file_context: Dict[str, Any]) -> str:
@@ -678,6 +970,7 @@ async def review_file(
     diff_chunk: str,
     path: str,
     pr_context: Optional[Dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Review a single file's diff; return list of {line, body} for inline comments.
 
@@ -685,6 +978,18 @@ async def review_file(
     """
     user_parts = []
     if pr_context:
+        runtime_target = pr_context.get("runtime_target")
+        if runtime_target:
+            user_parts.append(
+                f"Target runtime for this file: {runtime_target} — this is the repo's declared "
+                "target and is AUTHORITATIVE. Assume every API, method, and parameter available in "
+                "this version exists. Do NOT flag an API as missing/unavailable if it exists in this "
+                "version, and do NOT add hypothetical 'if this runs on an older version' caveats — "
+                "the target IS this version."
+            )
+        external_api_notes = pr_context.get("external_api_notes")
+        if external_api_notes:
+            user_parts.append(external_api_notes)
         file_context = pr_context.get("file_context")
         if file_context:
             fc_block = _format_file_context(file_context)
@@ -787,12 +1092,17 @@ async def review_file(
         logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
-    system_prompt = REVIEW_FILE_SYSTEM
-    if (pr_context or {}).get("is_test"):
-        system_prompt = REVIEW_FILE_SYSTEM + TEST_FILE_APPENDIX
-    raw = await _call_llm(system_prompt, user_content)
+    _base = REVIEW_FILE_SYSTEM_EXTENDED_THINKING if reasoning_effort else REVIEW_FILE_SYSTEM
+    system_prompt = _base + (TEST_FILE_APPENDIX if (pr_context or {}).get("is_test") else "")
+    raw = await _call_llm(system_prompt, user_content, reasoning_effort=reasoning_effort)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
-    return _parse_review_file_response(raw, path)
+
+    async def _recall(repair_prompt: str) -> str:
+        return await _call_llm(
+            REVIEW_FILE_SYSTEM, repair_prompt, reasoning_effort=reasoning_effort
+        )
+
+    return await parse_with_repair(raw, path, _recall)
 
 
 def extract_comment_severity_and_title(body: str) -> tuple:
@@ -832,9 +1142,48 @@ def extract_comment_severity_and_title(body: str) -> tuple:
     return ("suggestion", first)
 
 
-def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
+def _format_off_diff_section(off_diff: List[Dict[str, Any]]) -> str:
+    """Render findings that could not be posted inline (not on a changed line).
+
+    Grouped under a clear subheading so a human reads them as out-of-scope
+    context rather than line-anchored review comments. Emitted as full comment
+    bodies so downstream extractors ingest the finding text.
+    """
+    items = [c for c in off_diff if (c.get("body") or "").strip()]
+    if not items:
+        return ""
+    lines: List[str] = [
+        "",
+        "---",
+        "",
+        "### Findings not on changed lines (out of scope for inline comments)",
+        "",
+        "> These relate to code the PR did not directly change (cross-file / design), "
+        "so they can't be attached to a diff line. Listed here for visibility.",
+        "",
+    ]
+    for c in sorted(items, key=lambda x: (x.get("path") or "", x.get("line") or 0)):
+        path = c.get("path") or "?"
+        line = c.get("line") or "?"
+        body = (c.get("body") or "").strip()
+        lines.append(f"**`{path}` (near line {line})**")
+        lines.append("")
+        lines.append(body)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_structured_summary(
+    comments: List[Dict[str, Any]],
+    off_diff: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Build a structured summary with alert blocks and collapsible file details."""
+    off_diff = off_diff or []
+    off_diff_section = _format_off_diff_section(off_diff)
     if not comments:
+        # No inline findings, but off-diff findings still need to be surfaced.
+        if off_diff_section:
+            return "## Sift Review\n\n> No issues on changed lines.\n" + off_diff_section
         return "Sifted through the code and found no issues."
 
     counts: Dict[str, int] = {
@@ -939,13 +1288,19 @@ def _build_structured_summary(comments: List[Dict[str, Any]]) -> str:
     lines.append("---")
     lines.append("")
     lines.append("*Inline comments with details and suggested fixes are on the Files changed tab.*")
+    if off_diff_section:
+        lines.append(off_diff_section)
     return "\n".join(lines)
 
 
-async def summarize_review(comments: List[Dict[str, Any]]) -> str:
+async def summarize_review(
+    comments: List[Dict[str, Any]],
+    off_diff: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
-    Cross-file insights are produced by the holistic pipeline pass (Phase 3) as inline
-    findings; this function only builds the structured summary table.
+    `comments` are inline (on-diff) findings rendered as a table. `off_diff`
+    findings could not be attached to a changed line (holistic / cross-file) and
+    are rendered under a dedicated out-of-scope subheading so they stay visible.
     """
-    return _build_structured_summary(comments)
+    return _build_structured_summary(comments, off_diff)

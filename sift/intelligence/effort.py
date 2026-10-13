@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 from sift import config
 
@@ -25,7 +26,9 @@ class EffortPlan:
     run_holistic: bool
     enable_agentic: bool
     context_depth: int
-    request_reasoning: bool
+    # LiteLLM `reasoning_effort` to request on the primary/critic calls: "low"/"high",
+    # or None to leave reasoning off. Only applied when the model supports reasoning.
+    reasoning_effort: Optional[str]
 
 
 _PLANS: dict[EffortLevel, EffortPlan] = {
@@ -36,7 +39,7 @@ _PLANS: dict[EffortLevel, EffortPlan] = {
         run_holistic=False,
         enable_agentic=False,
         context_depth=0,
-        request_reasoning=False,
+        reasoning_effort=None,
     ),
     EffortLevel.BALANCED: EffortPlan(
         level=EffortLevel.BALANCED,
@@ -45,7 +48,7 @@ _PLANS: dict[EffortLevel, EffortPlan] = {
         run_holistic=True,
         enable_agentic=False,
         context_depth=1,
-        request_reasoning=True,
+        reasoning_effort="low",
     ),
     EffortLevel.HIGH: EffortPlan(
         level=EffortLevel.HIGH,
@@ -54,7 +57,7 @@ _PLANS: dict[EffortLevel, EffortPlan] = {
         run_holistic=True,
         enable_agentic=True,
         context_depth=2,
-        request_reasoning=True,
+        reasoning_effort="high",
     ),
 }
 

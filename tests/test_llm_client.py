@@ -6,11 +6,19 @@ Regression coverage for the parser bug that shipped silently through PRs
 in that prose (e.g. "[L10]") defeated the old first-bracket-to-last-bracket
 parser, producing zero findings with no visible error.
 """
+import logging
+
+import pytest
+
 from sift.intelligence.llm_client import (
     _balanced_array_end,
+    _build_structured_summary,
     _extract_json_array,
+    _items_to_comments,
     _parse_review_file_response,
     _strip_thinking_blocks,
+    parse_with_repair,
+    summarize_review,
 )
 
 
@@ -118,6 +126,21 @@ def test_extract_empty_array():
     assert _extract_json_array("<reasoning>nothing</reasoning>\n[]") == []
 
 
+# ---- shared conversion helper: _items_to_comments ----
+
+def test_items_to_comments_filters_low_confidence_and_formats():
+    items = [
+        {"line": 1, "severity": "bug", "title": "Real", "body": "boom", "confidence": 9},
+        {"line": 2, "severity": "nit", "title": "Weak", "body": "meh", "confidence": 3},
+        {"line": 0, "severity": "bug", "title": "Bad line", "body": "x", "confidence": 9},
+        {"line": 4, "severity": "bug", "title": "No conf defaults to 7", "body": "z"},
+    ]
+    out = _items_to_comments(items, "f.py")
+    lines = sorted(c["line"] for c in out)
+    assert lines == [1, 4]  # confidence<5 dropped; line<=0 dropped; missing confidence kept
+    assert all(c["body"].strip() for c in out)
+
+
 # ---- full seam: _parse_review_file_response ----
 
 def test_parse_review_full_seam_pr238():
@@ -135,6 +158,131 @@ def test_parse_review_genuinely_empty_returns_empty():
     assert _parse_review_file_response("<reasoning>looks fine</reasoning>\n[]", "f.ts") == []
 
 
+def test_parse_review_empty_array_logs_no_parse_failure(caplog):
+    """A valid [] after a reasoning block is a genuine empty result, not a failure.
+
+    Regression for the cal.com run: a closed <reasoning> block followed by [] was
+    returning [] correctly but still logging a false 'Review parse FAILURE' (and
+    inflating the harness health counter). The reasoning here also contains an
+    'on line 42' phrase to prove the empty array short-circuits before the
+    line-ref fallback can fabricate a finding from prose.
+    """
+    raw = "<reasoning>looks fine, though on line 42 something\n</reasoning>\n[]"
+    with caplog.at_level(logging.WARNING, logger="sift.intelligence.llm_client"):
+        out = _parse_review_file_response(raw, "f.ts")
+    assert out == []
+    assert "parse FAILURE" not in caplog.text
+
+
+def test_parse_review_reasoning_prose_does_not_fabricate_finding():
+    """Reasoning-only output (no JSON array) must not yield a fabricated finding.
+
+    The line-ref fallback runs on reasoning-stripped text, so an 'On line 42 …'
+    sentence inside <reasoning> can never be mistaken for a Line-N finding.
+    """
+    raw = "<reasoning>\nOn line 42 the loop looks wrong but is actually fine.\n</reasoning>"
+    assert _parse_review_file_response(raw, "f.py") == []
+
+
+# ---- unclosed <reasoning> (truncated / never-emitted-array output) ----
+
+def test_strip_unclosed_reasoning_to_eof():
+    # Model wrote reasoning then stopped before the closing tag + JSON array.
+    assert _strip_thinking_blocks("<reasoning>\nfound a bug on [L5]") == ""
+
+
+def test_strip_keeps_json_before_unclosed_reasoning():
+    out = _strip_thinking_blocks('[{"line": 5}]\n<reasoning>\ntrailing junk')
+    assert '"line": 5' in out
+    assert "trailing junk" not in out
+
+
+# ---- parse_with_repair ----
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_recovers_prose_only_output():
+    """Flash's failure mode: reasoning written, JSON array never emitted."""
+    raw = "<reasoning>\nThe change on [L5] dereferences x which may be None.\n"  # unclosed, no array
+    calls = []
+
+    async def recall(prompt: str) -> str:
+        calls.append(prompt)
+        return '[{"line": 5, "severity": "bug", "title": "None deref", "body": "x may be None", "confidence": 9}]'
+
+    out = await parse_with_repair(raw, "f.py", recall)
+    assert len(out) == 1
+    assert out[0]["line"] == 5
+    assert len(calls) == 1
+    assert "JSON array" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_skips_genuine_empty():
+    """A correct [] means the model complied — do NOT waste a repair call."""
+    raw = "<reasoning>\nNothing wrong here.\n</reasoning>\n[]"
+    called = False
+
+    async def recall(prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "[]"
+
+    out = await parse_with_repair(raw, "f.py", recall)
+    assert out == []
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_no_repair_when_already_parsed():
+    raw = PR_238_RAW  # has a valid array already
+    called = False
+
+    async def recall(prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "[]"
+
+    out = await parse_with_repair(raw, "src/extension.ts", recall)
+    assert len(out) == 3
+    assert called is False
+
+
+# ---- off-diff routing into the summary ----
+
+_OFF_DIFF = [
+    {
+        "path": "src/flusher.py",
+        "line": 130,
+        "body": "![BUG](https://img.shields.io/badge/BUG-AA0000?style=for-the-badge) SpawnProcess isinstance check\n\nThe isinstance check is always false for spawned processes.",
+    }
+]
+
+
+def test_summary_renders_off_diff_section():
+    out = _build_structured_summary([], _OFF_DIFF)
+    assert "Findings not on changed lines" in out
+    assert "src/flusher.py" in out
+    assert "SpawnProcess isinstance check" in out
+    assert "found no issues" not in out
+
+
+def test_summary_off_diff_only_is_not_empty_state():
+    """Regression: off-diff-only reviews must not fall back to 'no issues'."""
+    out = _build_structured_summary([], _OFF_DIFF)
+    assert out.strip() != "Sifted through the code and found no issues."
+
+
+def test_summary_no_findings_at_all_is_empty_state():
+    assert _build_structured_summary([], []) == "Sifted through the code and found no issues."
+
+
+@pytest.mark.asyncio
+async def test_summarize_review_appends_off_diff_to_inline():
+    inline = [{"path": "a.py", "line": 3, "body": "![WARNING](https://img.shields.io/badge/WARNING-B8860B?style=for-the-badge) Something\n\nbody"}]
+    out = await summarize_review(inline, _OFF_DIFF)
+    assert "Sift Review" in out                       # main table present
+    assert "Findings not on changed lines" in out     # off-diff section appended
+    assert "SpawnProcess isinstance check" in out
 # ---- structured fields carried through the parser (PR #24 severity fix) ----
 
 def test_parse_json_carries_severity_title_confidence():
@@ -162,6 +310,54 @@ def test_parse_freeform_has_no_structured_label():
     assert len(out) == 1
     assert out[0]["severity"] is None
     assert out[0]["confidence"] == 7
+
+
+# --- line-number marker uses the correct per-language comment token (or a gutter) ---
+from sift.intelligence.llm_client import (  # noqa: E402
+    _annotate_diff_with_line_numbers,
+    _line_comment_token,
+)
+
+
+def _plus(path):
+    # single added line at new-file L10 (no context line to consume the number)
+    annotated = _annotate_diff_with_line_numbers("@@ -1,1 +10,1 @@\n+added\n", path)
+    return [ln for ln in annotated.splitlines() if ln.startswith("+")][0]
+
+
+def test_marker_hash_for_yaml_and_properties():
+    # regression: these used to get an invalid "// [Ln]" which the model flagged as a bug
+    assert _plus("cfg.yml").endswith("  # [L10]")
+    assert _plus("messages.properties").endswith("  # [L10]")
+
+
+def test_marker_slash_for_cstyle():
+    assert _plus("x.go").endswith("  // [L10]")
+    assert _plus("x.ts").endswith("  // [L10]")
+
+
+def test_marker_dash_for_lua_and_sql():
+    assert _plus("x.lua").endswith("  -- [L10]")
+    assert _plus("x.sql").endswith("  -- [L10]")
+
+
+def test_marker_gutter_for_commentless_formats():
+    # JSON/markup have no safe inline comment -> leading [L<n>] gutter, never a // comment
+    assert _plus("data.json") == "+[L10] added"
+    assert _plus("view.erb") == "+[L10] added"
+
+
+def test_marker_unknown_ext_uses_gutter():
+    assert _plus("weird.xyz") == "+[L10] added"
+
+
+def test_marker_dockerfile_uses_hash():
+    assert _plus("Dockerfile").endswith("  # [L10]")
+
+
+def test_line_comment_token_lookup():
+    assert _line_comment_token("a.py") == "#"
+    assert _line_comment_token("a.zzz") is None
 
 
 # ---- _call_llm: api_key / num_retries passthrough on the LiteLLM path ----

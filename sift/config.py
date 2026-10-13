@@ -41,6 +41,21 @@ CODEQL_SUITE_RAW = (os.environ.get("CODEQL_SUITE") or "default").strip().lower()
 _VALID_SUITES = ("default", "security-extended", "security-and-quality")
 CODEQL_SUITE = CODEQL_SUITE_RAW if CODEQL_SUITE_RAW in _VALID_SUITES else "default"
 CODEQL_TIMEOUT = int(os.environ.get("CODEQL_TIMEOUT") or "600")
+# Local CodeQL query-pack cache. The bundled packs (codeql/<lang>-queries) live here but
+# are not always on the CLI's default resolve path, so analyze passes --additional-packs.
+CODEQL_PACKAGES_DIR = os.environ.get("CODEQL_PACKAGES_DIR") or os.path.expanduser("~/.codeql/packages")
+
+# Pyright type-checker (optional; default disabled). Deterministic API/version-existence
+# findings, promoted critic-exempt. Runs against the full clone (like CodeQL).
+_PYRIGHT_ENABLED_RAW = (os.environ.get("PYRIGHT_ENABLED") or "0").strip().lower()
+PYRIGHT_ENABLED = _PYRIGHT_ENABLED_RAW in ("1", "true", "yes")
+PYRIGHT_TIMEOUT = int(os.environ.get("PYRIGHT_TIMEOUT") or "600")
+
+# Deterministic AST verdict analyzers (language seam). High-precision, promoted
+# as critic-exempt findings. On by default; set ANALYZERS_ENABLED=0 to disable.
+_ANALYZERS_ENABLED_RAW = (os.environ.get("ANALYZERS_ENABLED") or "1").strip().lower()
+ANALYZERS_ENABLED = _ANALYZERS_ENABLED_RAW in ("1", "true", "yes")
+
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or "300")
 # Base directory for cached git clones (default: ~/.sift/clones or temp)
 _sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
@@ -109,10 +124,19 @@ _review_base = (os.environ.get("SIFT_REVIEW_MODEL_BASE_URL") or "").strip()
 SIFT_REVIEW_MODEL_BASE_URL = _review_base.rstrip("/") if _review_base else None
 
 # JSON object to hard-override capability detection for unknown / self-hosted models.
+# SIFT_CAPABILITY_OVERRIDE applies to the primary model; SIFT_REVIEW_CAPABILITY_OVERRIDE to
+# the critic/holistic model. Both unset by default so detection runs (per-role, not global).
 SIFT_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_CAPABILITY_OVERRIDE") or "").strip() or None
+SIFT_REVIEW_CAPABILITY_OVERRIDE = (os.environ.get("SIFT_REVIEW_CAPABILITY_OVERRIDE") or "").strip() or None
 
 # Max tool-call steps in the high-effort agentic retrieval loop (Phase 4).
 SIFT_AGENTIC_MAX_STEPS = int(os.environ.get("SIFT_AGENTIC_MAX_STEPS") or "4")
+
+# Per-review token/cost capture (opt-in; see sift/observability/cost.py). Off by default —
+# enable on the benchmark to get a greppable per-review [cost] summary line (tokens per model,
+# cache read/write, USD). No effect on model outputs.
+_COST_TRACKING_RAW = (os.environ.get("SIFT_COST_TRACKING") or "0").strip().lower()
+SIFT_COST_TRACKING = _COST_TRACKING_RAW in ("1", "true", "yes")
 
 # Per-file reviewer: render the whole file as context when it is at or under this
 # many lines; above it, fall back to rendering only the changed line ranges.
@@ -148,5 +172,6 @@ def setup_logging() -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 

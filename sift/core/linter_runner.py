@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -506,8 +507,16 @@ def _run_go_vet(root: Path, path: str) -> List[LinterIssue]:
 
 
 def _run_spotbugs(root: Path, path: str, path_to_content: Dict[str, str]) -> List[LinterIssue]:
-    """Compile Java file in temp dir, run SpotBugs on classes; return issues for this path only."""
+    """Compile Java file in temp dir, run SpotBugs on classes; return issues for this path only.
+
+    Requires SpotBugs. Without it, single-file `javac` on a multi-module repo only produces
+    classpath-artifact errors (`cannot find symbol`) that are noise, not bugs — so we skip the
+    whole path when SpotBugs is absent, and never surface javac compile errors as findings.
+    """
     out: List[LinterIssue] = []
+    if not shutil.which("spotbugs"):
+        logger.debug("SpotBugs not installed; skipping Java linting for %s", path)
+        return out
     full = root / path
     if not full.exists():
         return out
@@ -532,22 +541,9 @@ def _run_spotbugs(root: Path, path: str, path_to_content: Dict[str, str]) -> Lis
         return out
 
     if comp.returncode != 0:
-        # Parse javac stderr for line numbers as fallback
-        for line in (comp.stderr or "").splitlines():
-            # pattern: path:line: message
-            m = re.match(r"^(.+):(\d+):\s*(.+)$", line)
-            if m:
-                try:
-                    line_no = int(m.group(2))
-                    out.append({
-                        "line": line_no,
-                        "message": (m.group(3) or "").strip(),
-                        "severity": "error",
-                        "rule_id": "javac",
-                        "source": "spotbugs",
-                    })
-                except ValueError:
-                    pass
+        # Single-file compile failure in a multi-module repo is a classpath artifact,
+        # not a bug — do not surface javac errors as findings.
+        logger.debug("javac could not compile %s standalone; skipping SpotBugs", path)
         return out
 
     try:
@@ -632,6 +628,29 @@ _PERLCRITIC_RE = re.compile(
 # json.tool stderr: "..." line N or line N column M
 _JSON_TOOL_LINE_RE = re.compile(r"line\s+(\d+)", re.IGNORECASE)
 
+_RUBOCOP_CONFIG = """\
+AllCops:
+  TargetRubyVersion: 3.4
+  DisabledByDefault: true
+  SuggestExtensions: false
+Lint:
+  Enabled: true
+Security:
+  Enabled: true
+"""
+
+
+def _ensure_rubocop_config(root: Path) -> Path:
+    """Write a controlled .rubocop.yml into root if absent; return its path.
+
+    Idempotent: _run_rubocop is called once per Ruby file over the shared temp root,
+    so we only write the config on the first call.
+    """
+    cfg = root / ".rubocop.yml"
+    if not cfg.exists():
+        cfg.write_text(_RUBOCOP_CONFIG, encoding="utf-8")
+    return cfg
+
 
 def _run_rubocop(root: Path, path: str) -> List[LinterIssue]:
     """Run rubocop on a single file; return list of unified issues."""
@@ -639,9 +658,10 @@ def _run_rubocop(root: Path, path: str) -> List[LinterIssue]:
     full = root / path
     if not full.exists():
         return out
+    cfg = _ensure_rubocop_config(root)
     try:
         result = subprocess.run(
-            ["rubocop", "--format", "json", str(full)],
+            ["rubocop", "--config", str(cfg), "--format", "json", str(full)],
             capture_output=True,
             text=True,
             timeout=LINTER_TIMEOUT_PER_FILE,

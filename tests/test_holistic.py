@@ -10,6 +10,9 @@ from sift.intelligence.capability import ModelCapability
 from sift.intelligence.effort import EffortLevel, plan_for
 from sift.intelligence.passes.holistic import (
     PRDigest,
+    _collect_external_callers,
+    _format_digest,
+    _parse_holistic_response,
     build_digest,
     review_holistic,
 )
@@ -73,6 +76,8 @@ async def test_review_holistic_returns_findings():
     mock_raw = """[{
         "path": "app/api.py",
         "line": 4,
+        "def_location": "auth.py:2",
+        "caller_location": "app/api.py:4",
         "title": "Caller not updated",
         "body": "verify_token signature changed",
         "impact": "high",
@@ -150,6 +155,8 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     holistic_raw = """[{
         "path": "app/api.py",
         "line": 4,
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/api.py:4",
         "title": "Duplicate",
         "body": "same issue",
         "impact": "high",
@@ -159,11 +166,13 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     }, {
         "path": "app/other.py",
         "line": 2,
-        "title": "New cross-file",
-        "body": "design issue",
-        "impact": "low",
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/other.py:2",
+        "title": "New cross-file caller not updated",
+        "body": "stale caller of changed verify() signature",
+        "impact": "high",
         "certainty": "likely",
-        "category": "design",
+        "category": "correctness",
         "post_inline": true
     }]"""
     pr_meta = PRMeta(
@@ -174,10 +183,17 @@ async def test_pipeline_dedupes_holistic_against_per_file():
             "app/api.py": [_chunk("app/api.py", "handle", 1, 10)],
             "app/auth.py": [_chunk("app/auth.py", "verify", 1, 5)],
         },
+        # A caller_location outside the PR's changed files must now be find_callers-verified
+        # (see _collect_external_callers) — "app/other.py:2" below is only kept because the
+        # mocked find_callers legitimately reports it as a real usage of the changed symbol.
+        repo_root="/fake/repo",
     )
     plan = plan_for(EffortLevel.BALANCED)
     cap = ModelCapability(8192, 2048, False, False)
     with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value="app/other.py:2:  verify(token)",
+    ), mock.patch(
         "sift.intelligence.passes.holistic._call_llm",
         new=AsyncMock(return_value=holistic_raw),
     ):
@@ -185,4 +201,183 @@ async def test_pipeline_dedupes_holistic_against_per_file():
     api_line4 = [f for f in findings if f.path == "app/api.py" and f.line == 4]
     assert len(api_line4) == 1
     assert api_line4[0].origin == "llm"
-    assert any(f.path == "app/other.py" and f.origin == "holistic" for f in findings)
+    other = [f for f in findings if f.path == "app/other.py" and f.origin == "holistic"]
+    assert len(other) == 1
+    assert other[0].post_inline is False  # unchanged file — no diff line to anchor inline
+
+
+# ---- unchanged-caller contract drift (find_callers-verified) ----
+
+def test_collect_external_callers_finds_usage_outside_changed_files():
+    pr_meta = PRMeta(
+        title="t", body="", repo_root="/fake/repo",
+        mod_funcs_by_path={"app/auth.py": [_chunk("app/auth.py", "verify", 1, 5)]},
+    )
+    changed_functions = [{"path": "app/auth.py", "name": "verify", "lines": "1-5"}]
+    changed_paths = frozenset({"app/auth.py"})
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value="app/legacy_client.py:42:  if not verify(token): raise Error()",
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, changed_paths)
+    assert len(external) == 1
+    assert external[0] == {
+        "symbol": "verify", "path": "app/legacy_client.py", "line": 42,
+        "snippet": "if not verify(token): raise Error()",
+    }
+
+
+def test_collect_external_callers_excludes_changed_file_matches():
+    # find_callers also matches usages inside files the PR already changed — those are already
+    # visible to the model via the normal diff, so they must not be duplicated as "external".
+    pr_meta = PRMeta(
+        title="t", body="", repo_root="/fake/repo",
+        mod_funcs_by_path={"app/auth.py": [_chunk("app/auth.py", "verify", 1, 5)]},
+    )
+    changed_functions = [{"path": "app/auth.py", "name": "verify", "lines": "1-5"}]
+    changed_paths = frozenset({"app/auth.py", "app/api.py"})
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value="app/api.py:9:  verify(token)",
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, changed_paths)
+    assert external == []
+
+
+def test_collect_external_callers_without_repo_root_returns_nothing():
+    pr_meta = PRMeta(title="t", body="")  # no repo_root
+    changed_functions = [{"path": "app/auth.py", "name": "verify", "lines": "1-5"}]
+    assert _collect_external_callers(pr_meta, changed_functions, frozenset({"app/auth.py"})) == []
+
+
+# A changed file whose diff only adds lines 3-4; line 40 is untouched.
+_EXT_DIFF = (
+    "diff --git a/src/extension.ts b/src/extension.ts\n"
+    "--- a/src/extension.ts\n"
+    "+++ b/src/extension.ts\n"
+    "@@ -1,3 +1,4 @@\n"
+    " import * as vscode from 'vscode';\n"
+    " \n"
+    "+import { getFolderStructure } from './folderUtils';\n"
+    "+const tree = getFolderStructure(uri, 3);\n"
+)
+
+
+def test_collect_external_callers_keeps_untouched_line_of_changed_file():
+    # Stale one-arg caller below the hunks of a file the PR also edited (ghost PR #255 shape):
+    # only the '+' lines are visible to the model, so the untouched call site must be surfaced.
+    pr_meta = PRMeta(
+        title="t", body="", repo_root="/fake/repo",
+        mod_funcs_by_path={"src/folderUtils.ts": [_chunk("src/folderUtils.ts", "getFolderStructure", 17, 43)]},
+        raw_diffs={"src/extension.ts": _EXT_DIFF},
+    )
+    changed_functions = [{"path": "src/folderUtils.ts", "name": "getFolderStructure", "lines": "17-43"}]
+    changed_paths = frozenset({"src/folderUtils.ts", "src/extension.ts"})
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value=(
+            "src/extension.ts:4:const tree = getFolderStructure(uri, 3);\n"
+            "src/extension.ts:40:\tconst structure = await getFolderStructure(folderUri);"
+        ),
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, changed_paths)
+    assert external == [{
+        "symbol": "getFolderStructure", "path": "src/extension.ts", "line": 40,
+        "snippet": "const structure = await getFolderStructure(folderUri);",
+    }]
+
+
+def test_collect_external_callers_skips_changed_symbols_own_definition():
+    # find_callers matches `function activate(` itself; its own (untouched) def line isn't a caller.
+    pr_meta = PRMeta(title="t", body="", repo_root="/fake/repo", raw_diffs={"src/extension.ts": _EXT_DIFF})
+    changed_functions = [{"path": "src/extension.ts", "name": "activate", "lines": "10-22"}]
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value="src/extension.ts:10:export function activate(context: vscode.ExtensionContext) {",
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, frozenset({"src/extension.ts"}))
+    assert external == []
+
+
+def test_format_digest_shows_changed_signature():
+    chunk = FunctionChunk(
+        path="src/folderUtils.ts", name="getFolderStructure", start_line=17, end_line=43,
+        text="\nexport async function getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {\n  return {};\n}",
+        content_hash="abc",
+    )
+    digest = build_digest(PRMeta(title="t", body="", mod_funcs_by_path={"src/folderUtils.ts": [chunk]}), [])
+    assert digest.changed_functions[0]["signature"] == (
+        "export async function getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {"
+    )
+    assert (
+        "- src/folderUtils.ts  getFolderStructure(lines 17-43): export async function "
+        "getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {"
+    ) in _format_digest(digest)
+
+
+def test_parse_holistic_response_keeps_verified_external_caller():
+    digest = PRDigest(
+        title="t", body="", changed_functions=[], import_edges=[], per_file_findings=[],
+        changed_paths=frozenset({"app/auth.py"}),
+        external_callers=[{"symbol": "verify", "path": "app/legacy_client.py", "line": 42, "snippet": "verify(token)"}],
+    )
+    raw = """[{
+        "path": "app/legacy_client.py",
+        "line": 42,
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/legacy_client.py:42",
+        "title": "Stale caller of changed verify() contract",
+        "body": "legacy client still assumes the old signature",
+        "impact": "high",
+        "certainty": "likely",
+        "category": "correctness",
+        "post_inline": true
+    }]"""
+    findings = _parse_holistic_response(raw, digest)
+    assert len(findings) == 1
+    assert findings[0].path == "app/legacy_client.py"
+    assert findings[0].post_inline is False  # forced — unchanged file, no diff line to anchor to
+
+
+def test_parse_holistic_response_drops_unverified_external_caller():
+    digest = PRDigest(
+        title="t", body="", changed_functions=[], import_edges=[], per_file_findings=[],
+        changed_paths=frozenset({"app/auth.py"}),
+        external_callers=[],  # nothing verified
+    )
+    raw = """[{
+        "path": "app/some_random_file.py",
+        "line": 10,
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/some_random_file.py:10",
+        "title": "Unverified claim",
+        "body": "model asserts this without any tool evidence",
+        "impact": "high",
+        "certainty": "likely",
+        "category": "correctness",
+        "post_inline": true
+    }]"""
+    assert _parse_holistic_response(raw, digest) == []
+
+
+def test_parse_holistic_response_drops_def_location_outside_changed_files():
+    # Only a definition THIS PR actually changed counts as drift — a def_location claim
+    # pointing outside the changed files is never legitimate, verified or not.
+    digest = PRDigest(
+        title="t", body="", changed_functions=[], import_edges=[], per_file_findings=[],
+        changed_paths=frozenset({"app/api.py"}),
+        external_callers=[{"symbol": "verify", "path": "app/auth.py", "line": 3, "snippet": "def verify(token):"}],
+    )
+    raw = """[{
+        "path": "app/api.py",
+        "line": 4,
+        "def_location": "app/auth.py:3",
+        "caller_location": "app/api.py:4",
+        "title": "Def not actually changed by this PR",
+        "body": "auth.py wasn't touched by this PR",
+        "impact": "high",
+        "certainty": "likely",
+        "category": "correctness",
+        "post_inline": true
+    }]"""
+    assert _parse_holistic_response(raw, digest) == []

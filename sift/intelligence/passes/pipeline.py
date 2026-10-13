@@ -33,6 +33,8 @@ class PRMeta:
     # extraction is unavailable (e.g. eval harness without full file content).
     raw_diffs: Optional[dict] = None
     path_to_content: Optional[dict] = None
+    # Filesystem path to the PR's git checkout; powers repo-wide fact-tools.
+    repo_root: Optional[str] = None
 
 
 async def run_pipeline_per_file(
@@ -66,7 +68,11 @@ async def run_pipeline_per_file(
     from sift.intelligence.passes.static_promote import promote_static_findings
     semgrep_raw = (file.pr_context or {}).get("semgrep_findings") or []
     codeql_raw = (file.pr_context or {}).get("codeql_findings") or []
-    promoted = await promote_static_findings(file.path, file.file_diff, semgrep_raw, codeql_raw)
+    pyright_raw = (file.pr_context or {}).get("pyright_findings") or []
+    analyzer_raw = (file.pr_context or {}).get("analyzer_findings") or []
+    promoted = await promote_static_findings(
+        file.path, file.file_diff, semgrep_raw, codeql_raw, pyright_raw, analyzer_raw
+    )
     if promoted:
         logger.info("[pipeline] %s: %d static finding(s) auto-promoted", file.path, len(promoted))
 
@@ -80,9 +86,19 @@ async def run_pipeline_per_file(
             path_to_content,
             mod_funcs_by_path,
             retrieval_ctx,
+            repo_root=(pr_meta.repo_root if pr_meta else None),
         )
     else:
-        candidates = await generate_candidates(file.file_diff, file.path, enriched)
+        if plan.enable_agentic:
+            logger.info(
+                "[pipeline] %s: agentic skipped (model reports no tool calling); one-shot review",
+                file.path,
+            )
+        # Request reasoning on the primary generator only when the model supports it.
+        reasoning_effort = plan.reasoning_effort if cap.supports_reasoning else None
+        candidates = await generate_candidates(
+            file.file_diff, file.path, enriched, reasoning_effort=reasoning_effort
+        )
     logger.debug("[pipeline] %s: %d candidate(s) + %d promoted", file.path, len(candidates), len(promoted))
 
     # Merge promoted static findings in before the critic so rule_dedupe can
@@ -98,8 +114,15 @@ async def run_pipeline_per_file(
                 "[pipeline] %s: SIFT_REVIEW_MODEL not set, critic using primary model",
                 file.path,
             )
+        critic_ctx = {
+            **enriched,
+            # Carried for the symmetric critic tool loop (high effort).
+            "_repo_root": (pr_meta.repo_root if pr_meta else None),
+            "_path_to_content": path_to_content,
+            "_mod_funcs_by_path": mod_funcs_by_path,
+        }
         candidates = await critique(
-            candidates, file.file_diff, pr_title, plan, cap
+            candidates, file.file_diff, pr_title, plan, cap, critic_ctx
         )
         logger.debug("[pipeline] %s: %d after critic", file.path, len(candidates))
 
