@@ -35,10 +35,10 @@ on:
         description: "Bearer token for POST /review (optional)"
       SIFT_LLM_MODEL:
         required: false
-        description: "LLM model string (e.g. ollama/llama3.2)"
+        description: "LLM model string (e.g. ollama/llama3.2, anthropic/claude-haiku-4-5, groq/openai/gpt-oss-120b)"
       SIFT_LLM_API_KEY:
         required: false
-        description: "LLM provider API key (e.g. OPENAI_API_KEY value)"
+        description: "LLM provider API key (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY / GROQ_API_KEY value)"
       SIFT_LLM_API_BASE:
         required: false
         description: "LiteLLM chat API base URL (often required for ollama/...; also Azure OpenAI, self-hosted OpenAI-compatible APIs)"
@@ -180,6 +180,7 @@ jobs:
             -e OLLAMA_API_KEY="$SIFT_LLM_API_KEY" \
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
             -e ANTHROPIC_API_KEY="$SIFT_LLM_API_KEY" \
+            -e GROQ_API_KEY="$SIFT_LLM_API_KEY" \
             -e OPENROUTER_API_KEY="$SIFT_LLM_API_KEY" \
             -e LLM_API_BASE="${SIFT_LLM_API_BASE}" \
             -e GITHUB_WEBHOOK_SECRET="$SIFT_GITHUB_WEBHOOK_SECRET" \

@@ -358,3 +358,57 @@ def test_marker_dockerfile_uses_hash():
 def test_line_comment_token_lookup():
     assert _line_comment_token("a.py") == "#"
     assert _line_comment_token("a.zzz") is None
+
+
+# ---- _call_llm: api_key / num_retries passthrough on the LiteLLM path ----
+
+import asyncio
+from unittest import mock
+
+from sift.intelligence import llm_client
+
+
+def _fake_response(text: str = "ok"):
+    resp = mock.MagicMock()
+    resp.choices = [mock.MagicMock(message=mock.MagicMock(content=text))]
+    return resp
+
+
+def _run_call_llm(cfg_overrides, **call_kwargs):
+    fake = mock.AsyncMock(return_value=_fake_response())
+    with mock.patch.object(llm_client, "acompletion", new=fake), \
+         mock.patch.multiple(llm_client.config, **cfg_overrides):
+        asyncio.run(llm_client._call_llm("sys", "user", **call_kwargs))
+    return fake.call_args.kwargs
+
+
+_GROQ_CFG = {
+    "LLM_MODEL": "groq/openai/gpt-oss-120b",
+    "LLM_API_BASE": None,
+    "LLM_API_KEY": "gsk_test",
+    "SIFT_LLM_NUM_RETRIES": 4,
+}
+
+
+def test_call_llm_passes_llm_api_key_and_retries_without_base():
+    kw = _run_call_llm(_GROQ_CFG)
+    assert kw["model"] == "groq/openai/gpt-oss-120b"
+    assert kw["api_key"] == "gsk_test"
+    assert kw["api_base"] is None
+    assert kw["num_retries"] == 4
+
+
+def test_call_llm_critic_on_primary_model_inherits_key():
+    # Critic/holistic pass model=SIFT_REVIEW_MODEL or LLM_MODEL and api_key=None.
+    kw = _run_call_llm(_GROQ_CFG, model="groq/openai/gpt-oss-120b", api_key=None)
+    assert kw["api_key"] == "gsk_test"
+
+
+def test_call_llm_critic_on_other_provider_does_not_get_primary_key():
+    kw = _run_call_llm(_GROQ_CFG, model="anthropic/claude-haiku-4-5", api_key=None)
+    assert kw["api_key"] is None
+
+
+def test_call_llm_explicit_key_wins():
+    kw = _run_call_llm(_GROQ_CFG, model="anthropic/claude-haiku-4-5", api_key="sk-ant-x")
+    assert kw["api_key"] == "sk-ant-x"

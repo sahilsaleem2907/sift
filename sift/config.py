@@ -55,6 +55,8 @@ PYRIGHT_TIMEOUT = int(os.environ.get("PYRIGHT_TIMEOUT") or "600")
 # as critic-exempt findings. On by default; set ANALYZERS_ENABLED=0 to disable.
 _ANALYZERS_ENABLED_RAW = (os.environ.get("ANALYZERS_ENABLED") or "1").strip().lower()
 ANALYZERS_ENABLED = _ANALYZERS_ENABLED_RAW in ("1", "true", "yes")
+
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or "300")
 # Base directory for cached git clones (default: ~/.sift/clones or temp)
 _sift_clones = os.environ.get("SIFT_CLONE_CACHE_DIR")
 if _sift_clones:
@@ -97,6 +99,8 @@ VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
 # Concurrency / rate limiting
 SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") or "10")
 SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
+# LiteLLM retries (exponential backoff) on rate-limit / transient errors, e.g. Groq 429s
+SIFT_LLM_NUM_RETRIES = int(os.environ.get("SIFT_LLM_NUM_RETRIES") or "3")
 SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
 
 # PR blocking via commit status (default: disabled)

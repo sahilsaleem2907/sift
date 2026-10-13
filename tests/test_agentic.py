@@ -402,3 +402,32 @@ async def test_agentic_error_finish_reason_exhausts_to_fallback():
 
     mock_gen.assert_called_once()
     assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_agentic_passes_api_key_and_retries():
+    plan = plan_for(EffortLevel.HIGH)
+    cap = ModelCapability(131_072, 4096, True, True)
+    file_input = FileReviewInput(
+        path="app/a.py",
+        file_diff="diff --git a/app/a.py\n+++ b/app/a.py\n@@ -1 +1,2 @@\n+x\n",
+        pr_context={},
+    )
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=_mock_message(content="[]"))]
+    fake = AsyncMock(return_value=resp)
+
+    with mock.patch.multiple(
+        config,
+        LLM_MODEL="groq/openai/gpt-oss-120b",
+        LLM_API_BASE=None,
+        LLM_API_KEY="gsk_test",
+        SIFT_LLM_NUM_RETRIES=5,
+    ), mock.patch("sift.intelligence.passes.agentic.acompletion", new=fake):
+        await agentic_review(file_input, plan, cap, {}, {})
+
+    assert fake.await_count >= 1
+    for call in fake.await_args_list:
+        assert call.kwargs["model"] == "groq/openai/gpt-oss-120b"
+        assert call.kwargs["api_key"] == "gsk_test"
+        assert call.kwargs["num_retries"] == 5

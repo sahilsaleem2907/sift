@@ -89,7 +89,7 @@ uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
 This repo ships **reusable workflows** that pull your container image, run it with secrets, wait for `/health`, then call `POST /review` / `POST /feedback`. See [.github/workflows/sift-review.yml](.github/workflows/sift-review.yml) and [.github/workflows/sift-feedback.yml](.github/workflows/sift-feedback.yml).
 
-Required secrets for the workflows include **`SIFT_IMAGE`** and **`SIFT_DATABASE_URL`**; others (API keys, **`SIFT_LLM_MODEL`** / **`SIFT_LLM_API_KEY`** / **`SIFT_LLM_API_BASE`** for LiteLLM, GitHub App installation, etc.) are optional depending on your auth mode. Set **`SIFT_LLM_API_BASE`** when your model needs a custom endpoint (for example `ollama/...` or Azure OpenAI). `SIFT_API_BACKEND_BASE_URL` can be passed as an optional secret to override the Docker image default (`https://api.sift-agent.com`).
+Required secrets for the workflows include **`SIFT_IMAGE`** and **`SIFT_DATABASE_URL`**; others (API keys, **`SIFT_LLM_MODEL`** / **`SIFT_LLM_API_KEY`** / **`SIFT_LLM_API_BASE`** for LiteLLM, GitHub App installation, etc.) are optional depending on your auth mode. Set **`SIFT_LLM_API_BASE`** when your model needs a custom endpoint (for example `ollama/...` or Azure OpenAI). Hosted providers need no base URL — e.g. for Groq set `SIFT_LLM_MODEL=groq/openai/gpt-oss-120b` and put your Groq key in `SIFT_LLM_API_KEY`. `SIFT_API_BACKEND_BASE_URL` can be passed as an optional secret to override the Docker image default (`https://api.sift-agent.com`).
 
 ---
 
@@ -132,5 +132,3 @@ Sift is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AG
 
 - **Self-hosting with your own key is free, forever.** Running Sift internally — including as a service inside your org — carries no obligations.
 - **If you modify Sift and offer it to others over a network**, you must make your modified source available to those users under the same license. This keeps every improvement to Sift open, so no one can take it closed.
-
-Versions released before this change remain available under their original MIT terms; all releases going forward are AGPL-3.0.

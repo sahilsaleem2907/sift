@@ -108,12 +108,17 @@ def detect(model: str, override_raw: Optional[str] = None) -> ModelCapability:
         fn_calling = bool(litellm.supports_function_calling(model=lookup))
     except Exception:
         pass
+    reasoning = _detect_reasoning(model)
+    try:
+        reasoning = bool(litellm.supports_reasoning(model=model)) or reasoning
+    except Exception:
+        pass
 
     cap = ModelCapability(
         context_window=ctx,
         max_output_tokens=max_out,
         supports_function_calling=fn_calling,
-        supports_reasoning=_detect_reasoning(model),
+        supports_reasoning=reasoning,
     )
     _CACHE[cache_key] = cap
     logger.debug(

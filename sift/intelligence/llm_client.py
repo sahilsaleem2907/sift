@@ -260,7 +260,12 @@ async def _call_llm(
     """
     resolved_base = api_base or config.LLM_API_BASE or None
     resolved_model = model or config.LLM_MODEL
-    resolved_key = api_key or config.LLM_API_KEY or None
+    # Inherit LLM_API_KEY only for the primary model or a call sharing its base URL —
+    # a critic on a different provider must not be sent the primary provider's key.
+    shares_primary = resolved_model == config.LLM_MODEL or (
+        resolved_base is not None and resolved_base == config.LLM_API_BASE
+    )
+    resolved_key = api_key or (config.LLM_API_KEY if shares_primary else None) or None
 
     # When both a custom base and key are provided, call the OpenAI-compatible endpoint
     # directly — LiteLLM's ollama/ollama_chat providers don't forward Bearer auth. This path
@@ -285,7 +290,7 @@ async def _call_llm(
         headers = {"Authorization": f"Bearer {resolved_key}"}
         for attempt in range(5):
             try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
+                async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
                     resp = await client.post(url, json=payload, headers=headers)
             except httpx.RequestError as e:
                 # Connection/timeout — transient, back off and retry.
@@ -314,8 +319,10 @@ async def _call_llm(
             system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
         ),
         "api_base": resolved_base,
-        "timeout": 120.0,
+        "api_key": resolved_key,
+        "timeout": config.LLM_TIMEOUT,
         "temperature": temperature,
+        "num_retries": config.SIFT_LLM_NUM_RETRIES,
     }
     if reasoning_effort:
         # Anthropic requires temperature=1 with thinking, and max_tokens must exceed the
