@@ -1047,6 +1047,7 @@ async def _run_review_impl(
                     mod_funcs_by_path=mod_funcs_by_path,
                     raw_diffs={p: fd for p, fd in file_chunks if fd.strip()},
                     path_to_content=path_to_content,
+                    repo_root=repo_root_for_tools,
                 )
                 try:
                     all_findings = await run_pipeline_holistic(

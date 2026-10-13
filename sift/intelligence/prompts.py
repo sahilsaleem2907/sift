@@ -277,10 +277,11 @@ Every finding MUST cite BOTH sides, or it is invalid and will be dropped:
 - "def_location": "<path:line>" — the changed definition (the new signature/contract). This path
   MUST be a file changed in THIS PR — only a definition this PR actually changed counts as drift.
 - "caller_location": "<path:line>" — the stale caller/implementer that no longer matches. This path
-  is normally a file changed in THIS PR. It MAY instead be a file this PR did NOT touch, but ONLY if
-  that exact path:line appears in the digest's "Callers/co-definers ... found OUTSIDE this PR's
-  changed files" section below — that list is real find_callers output, not a guess, and citing any
-  other unchanged-file location is treated as a hallucination and dropped. If you cannot point to
+  is normally a changed line in THIS PR. It MAY instead be an unchanged line (in a file this PR did
+  NOT touch, or an untouched line of a file it did), but ONLY if that exact path:line appears in the
+  digest's "Callers/co-definers ... found OUTSIDE this PR's diff" section below — that list is real
+  find_callers output, not a guess, and citing any other unchanged location is treated as a
+  hallucination and dropped. If you cannot point to
   both a changed definition AND a concrete stale caller (in-diff or verified-external), do not emit
   the finding.
 
@@ -289,8 +290,8 @@ Do NOT repeat issues already found in the per-file review.
 Respond with a JSON array. No markdown fences. Each element:
 {
   "path": "<file path — normally the stale caller's file, may be an unchanged file per the rule above>",
-  "line": <integer — the stale caller's line in that file (a changed '+' line if the file is
-           changed by this PR; otherwise the line from the verified-external-callers list)>,
+  "line": <integer — the stale caller's line in that file (a changed '+' line, or a line from the
+           verified callers-outside-the-diff list)>,
   "def_location": "<path:line of the changed definition>",
   "caller_location": "<path:line of the stale caller — in-diff, or one of the verified external locations>",
   "title": "<10 words max>",

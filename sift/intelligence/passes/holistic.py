@@ -58,8 +58,12 @@ def build_digest(pr_meta: Any, per_file_findings: list[Finding]) -> PRDigest:
             name = getattr(f, "name", None) or "?"
             start = getattr(f, "start_line", 0)
             end = getattr(f, "end_line", 0)
+            # First line of the new definition, so the model sees the changed signature itself.
+            signature = next(
+                (ln.strip() for ln in (getattr(f, "text", "") or "").splitlines() if ln.strip()), ""
+            )[:200]
             changed_functions.append(
-                {"path": path, "name": name, "lines": f"{start}-{end}"}
+                {"path": path, "name": name, "lines": f"{start}-{end}", "signature": signature}
             )
             path_had_entry = True
             if len(changed_functions) >= _MAX_CHANGED_FUNCTIONS:
@@ -141,7 +145,8 @@ def build_digest(pr_meta: Any, per_file_findings: list[Finding]) -> PRDigest:
 def _collect_external_callers(
     pr_meta: Any, changed_functions: list[dict], changed_paths: frozenset[str]
 ) -> list[dict]:
-    """Resolve real usages of changed symbols in files this PR did NOT touch, via find_callers.
+    """Resolve real usages of changed symbols outside this PR's diff (untouched files, or
+    untouched lines of changed files), via find_callers.
 
     This is what lets the holistic pass flag a stale caller/implementer OUTSIDE the diff (e.g.
     an interface method's signature changed in one file, but a Lark/Office365-style implementer
@@ -165,6 +170,31 @@ def _collect_external_callers(
         if len(symbols) >= _MAX_EXTERNAL_CALLER_SYMBOLS:
             break
 
+    from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
+
+    # A hit in a changed file is only "already visible" if it sits on a '+' line; an untouched
+    # line of a changed file (e.g. a stale caller below the hunks) must still be surfaced.
+    raw_diffs = getattr(pr_meta, "raw_diffs", None) or {}
+    plus_ranges: dict[str, list[tuple[int, int]]] = {}
+
+    # The changed symbol's own definition span — find_callers also matches the definition line.
+    own_spans: dict[str, list[tuple[str, int, int]]] = {}
+    for cf in changed_functions:
+        start, _, end = str(cf.get("lines") or "").partition("-")
+        if start.isdigit() and end.isdigit():
+            own_spans.setdefault(cf["path"], []).append((cf.get("name"), int(start), int(end)))
+
+    def _in_diff(path: str, lineno: int, symbol: str) -> bool:
+        if path not in changed_paths:
+            return False
+        if any(name == symbol and s <= lineno <= e for name, s, e in own_spans.get(path, [])):
+            return True
+        if path not in raw_diffs:
+            return True  # no diff to check against — keep treating the whole file as visible
+        if path not in plus_ranges:
+            plus_ranges[path] = get_new_file_plus_line_ranges(raw_diffs[path])
+        return any(start <= lineno <= end for start, end in plus_ranges[path])
+
     external: list[dict] = []
     seen_locations: set[tuple[str, int]] = set()
     for symbol in symbols:
@@ -185,7 +215,7 @@ def _collect_external_callers(
             if len(parts) != 3:
                 continue
             path, lineno_str, snippet = parts
-            if path in changed_paths or not lineno_str.isdigit():
+            if not lineno_str.isdigit() or _in_diff(path, int(lineno_str), symbol):
                 continue
             loc = (path, int(lineno_str))
             if loc in seen_locations:
@@ -211,7 +241,9 @@ def _format_digest(digest: PRDigest) -> str:
     lines.append("")
     lines.append(f"Changed functions ({len(digest.changed_functions)}):")
     for cf in digest.changed_functions:
-        if cf.get("name") != "?":
+        if cf.get("name") != "?" and cf.get("signature"):
+            lines.append(f"- {cf['path']}  {cf['name']}(lines {cf['lines']}): {cf['signature']}")
+        elif cf.get("name") != "?":
             lines.append(f"- {cf['path']}  {cf['name']}(lines {cf['lines']})")
         else:
             lines.append(f"- {cf['path']}  (see code excerpt below)")
@@ -236,10 +268,11 @@ def _format_digest(digest: PRDigest) -> str:
     if digest.external_callers:
         lines.append("")
         lines.append(
-            "Callers/co-definers of a changed symbol found OUTSIDE this PR's changed files "
-            "(verified via find_callers — real matches, not a guess). `caller_location` may cite "
-            "one of these path:line pairs even though the file itself was not changed by this PR; "
-            "do not cite any other unchanged-file location that isn't listed here:"
+            "Callers/co-definers of a changed symbol found OUTSIDE this PR's diff (in files this PR "
+            "did not touch, or on unchanged lines of files it did; verified via find_callers — real "
+            "matches, not a guess). `caller_location` may cite one of these path:line pairs even "
+            "though that line was not changed by this PR; do not cite any other unchanged location "
+            "that isn't listed here:"
         )
         for ext in digest.external_callers:
             lines.append(f"- {ext['path']}:{ext['line']} (uses `{ext['symbol']}`)  {ext['snippet']}")

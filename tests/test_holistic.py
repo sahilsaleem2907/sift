@@ -11,6 +11,7 @@ from sift.intelligence.effort import EffortLevel, plan_for
 from sift.intelligence.passes.holistic import (
     PRDigest,
     _collect_external_callers,
+    _format_digest,
     _parse_holistic_response,
     build_digest,
     review_holistic,
@@ -247,6 +248,71 @@ def test_collect_external_callers_without_repo_root_returns_nothing():
     pr_meta = PRMeta(title="t", body="")  # no repo_root
     changed_functions = [{"path": "app/auth.py", "name": "verify", "lines": "1-5"}]
     assert _collect_external_callers(pr_meta, changed_functions, frozenset({"app/auth.py"})) == []
+
+
+# A changed file whose diff only adds lines 3-4; line 40 is untouched.
+_EXT_DIFF = (
+    "diff --git a/src/extension.ts b/src/extension.ts\n"
+    "--- a/src/extension.ts\n"
+    "+++ b/src/extension.ts\n"
+    "@@ -1,3 +1,4 @@\n"
+    " import * as vscode from 'vscode';\n"
+    " \n"
+    "+import { getFolderStructure } from './folderUtils';\n"
+    "+const tree = getFolderStructure(uri, 3);\n"
+)
+
+
+def test_collect_external_callers_keeps_untouched_line_of_changed_file():
+    # Stale one-arg caller below the hunks of a file the PR also edited (ghost PR #255 shape):
+    # only the '+' lines are visible to the model, so the untouched call site must be surfaced.
+    pr_meta = PRMeta(
+        title="t", body="", repo_root="/fake/repo",
+        mod_funcs_by_path={"src/folderUtils.ts": [_chunk("src/folderUtils.ts", "getFolderStructure", 17, 43)]},
+        raw_diffs={"src/extension.ts": _EXT_DIFF},
+    )
+    changed_functions = [{"path": "src/folderUtils.ts", "name": "getFolderStructure", "lines": "17-43"}]
+    changed_paths = frozenset({"src/folderUtils.ts", "src/extension.ts"})
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value=(
+            "src/extension.ts:4:const tree = getFolderStructure(uri, 3);\n"
+            "src/extension.ts:40:\tconst structure = await getFolderStructure(folderUri);"
+        ),
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, changed_paths)
+    assert external == [{
+        "symbol": "getFolderStructure", "path": "src/extension.ts", "line": 40,
+        "snippet": "const structure = await getFolderStructure(folderUri);",
+    }]
+
+
+def test_collect_external_callers_skips_changed_symbols_own_definition():
+    # find_callers matches `function activate(` itself; its own (untouched) def line isn't a caller.
+    pr_meta = PRMeta(title="t", body="", repo_root="/fake/repo", raw_diffs={"src/extension.ts": _EXT_DIFF})
+    changed_functions = [{"path": "src/extension.ts", "name": "activate", "lines": "10-22"}]
+    with mock.patch(
+        "sift.core.code_intel.find_callers",
+        return_value="src/extension.ts:10:export function activate(context: vscode.ExtensionContext) {",
+    ):
+        external = _collect_external_callers(pr_meta, changed_functions, frozenset({"src/extension.ts"}))
+    assert external == []
+
+
+def test_format_digest_shows_changed_signature():
+    chunk = FunctionChunk(
+        path="src/folderUtils.ts", name="getFolderStructure", start_line=17, end_line=43,
+        text="\nexport async function getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {\n  return {};\n}",
+        content_hash="abc",
+    )
+    digest = build_digest(PRMeta(title="t", body="", mod_funcs_by_path={"src/folderUtils.ts": [chunk]}), [])
+    assert digest.changed_functions[0]["signature"] == (
+        "export async function getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {"
+    )
+    assert (
+        "- src/folderUtils.ts  getFolderStructure(lines 17-43): export async function "
+        "getFolderStructure(folderUri: vscode.Uri, maxDepth: number) {"
+    ) in _format_digest(digest)
 
 
 def test_parse_holistic_response_keeps_verified_external_caller():
