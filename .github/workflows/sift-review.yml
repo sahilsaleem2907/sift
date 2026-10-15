@@ -176,6 +176,7 @@ jobs:
             -e DATABASE_URL="$SIFT_DATABASE_URL" \
             -e SIFT_API_KEY="$SIFT_API_KEY" \
             -e LLM_MODEL="${SIFT_LLM_MODEL:-ollama/llama3.2}" \
+            -e LLM_API_KEY="$SIFT_LLM_API_KEY" \
             -e OPENAI_API_KEY="$SIFT_LLM_API_KEY" \
             -e OLLAMA_API_KEY="$SIFT_LLM_API_KEY" \
             -e GEMINI_API_KEY="$SIFT_LLM_API_KEY" \
