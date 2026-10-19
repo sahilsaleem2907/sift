@@ -18,6 +18,7 @@ from sift.intelligence.llm_client import (
     litellm_kwargs,
 )
 from sift.intelligence.prompts import CRITIC_BATCHED_SYSTEM, CRITIC_FINDING_SYSTEM
+from sift.intelligence.rate_limit import call_with_limits, endpoint_key
 from sift.intelligence.schema import Certainty, Finding, Impact
 from sift.observability.cost import record_response
 
@@ -218,7 +219,7 @@ async def _acompletion_with_tools(
         # thinking constraint; max_tokens must exceed the thinking budget (4096 for "high").
         kwargs["reasoning_effort"] = reasoning_effort
         kwargs["max_tokens"] = 8192
-    resp = await acompletion(**kwargs)
+    resp = await call_with_limits(endpoint_key(kwargs), lambda: acompletion(**kwargs))
     record_response(llm_kw["model"], resp)
     return resp
 
@@ -307,7 +308,7 @@ async def _critique_with_tools(
     if reasoning_effort:
         final_kwargs["reasoning_effort"] = reasoning_effort
         final_kwargs["max_tokens"] = 8192
-    resp = await acompletion(**final_kwargs)
+    resp = await call_with_limits(endpoint_key(final_kwargs), lambda: acompletion(**final_kwargs))
     record_response(llm_kw["model"], resp)
     logger.info("[critic] tool loop budget (%d) exhausted, final verdict requested", _CRITIC_TOOL_MAX_STEPS)
     return resp.choices[0].message.content or ""

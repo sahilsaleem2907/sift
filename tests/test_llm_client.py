@@ -16,6 +16,7 @@ from sift.intelligence.llm_client import (
     _extract_json_array,
     _items_to_comments,
     _parse_review_file_response,
+    _salvage_truncated_array,
     _strip_thinking_blocks,
     parse_with_repair,
     summarize_review,
@@ -395,7 +396,8 @@ def test_call_llm_passes_llm_api_key_and_retries_without_base():
     assert kw["model"] == "groq/openai/gpt-oss-120b"
     assert kw["api_key"] == "gsk_test"
     assert kw["api_base"] is None
-    assert kw["num_retries"] == 4
+    # Retries live in rate_limit.call_with_limits; LiteLLM must not retry under a slot.
+    assert kw["num_retries"] == 0
 
 
 def test_call_llm_critic_on_primary_model_inherits_key():
@@ -412,3 +414,81 @@ def test_call_llm_critic_on_other_provider_does_not_get_primary_key():
 def test_call_llm_explicit_key_wins():
     kw = _run_call_llm(_GROQ_CFG, model="anthropic/claude-haiku-4-5", api_key="sk-ant-x")
     assert kw["api_key"] == "sk-ant-x"
+
+
+# ---- truncated-array salvage (output cut off before the closing ']') ----
+
+_COMPLETE_ITEM = '{"line": 3, "severity": "bug", "title": "None deref", "body": "x may be None", "confidence": 9}'
+_CUT_ITEM = '{"line": 73, "severity": "bug", "title": "Added required \'ip\' field", "body": "The Conn'
+
+
+def test_salvage_keeps_complete_objects_before_the_cut():
+    out = _salvage_truncated_array(f"[{_COMPLETE_ITEM}, {_CUT_ITEM}")
+    assert [o["line"] for o in out] == [3]
+
+
+def test_salvage_returns_none_when_first_object_is_cut():
+    assert _salvage_truncated_array(f"[{_CUT_ITEM}") is None
+
+
+def test_salvage_ignores_bracketed_prose():
+    assert _salvage_truncated_array("see [L10] and [1, 2") is None
+
+
+def test_parse_uses_salvage_for_truncated_array():
+    out = _parse_review_file_response(f"[{_COMPLETE_ITEM}, {_CUT_ITEM}", "f.py")
+    assert [c["line"] for c in out] == [3]
+
+
+def test_extract_accepts_raw_newlines_inside_strings():
+    raw = '[{"line": 3, "severity": "bug", "title": "t", "body": "line one\nline two", "confidence": 9}]'
+    assert _extract_json_array(raw)[0]["body"] == "line one\nline two"
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_skips_repair_when_salvaged():
+    called = False
+
+    async def recall(prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "[]"
+
+    out = await parse_with_repair(f"[{_COMPLETE_ITEM}, {_CUT_ITEM}", "f.py", recall)
+    assert len(out) == 1
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_parse_with_repair_still_repairs_when_nothing_salvaged():
+    async def recall(prompt: str) -> str:
+        return f"[{_COMPLETE_ITEM}]"
+
+    out = await parse_with_repair(f"[{_CUT_ITEM}", "f.py", recall)
+    assert [c["line"] for c in out] == [3]
+
+
+# ---- coverage gaps in the summary (unreviewed / skipped files) ----
+
+def test_summary_flags_unreviewed_files_instead_of_no_issues():
+    out = _build_structured_summary([], [], unreviewed=["web/App.tsx"])
+    assert "found no issues" not in out
+    assert "[!WARNING]" in out
+    assert "`web/App.tsx`" in out
+
+
+def test_summary_lists_skipped_files_with_reason():
+    out = _build_structured_summary([], [], skipped=[("yarn.lock", "generated or vendored")])
+    assert "found no issues" not in out
+    assert "`yarn.lock` — generated or vendored" in out
+
+
+def test_summary_with_findings_appends_coverage_section():
+    comment = {"path": "a.py", "line": 1, "body": "**Bug** something"}
+    out = _build_structured_summary([comment], [], unreviewed=["b.py"])
+    assert "`b.py`" in out
+    assert "1 issue(s) found" in out
+
+
+def test_summary_unchanged_when_fully_covered():
+    assert _build_structured_summary([], [], [], []) == "Sifted through the code and found no issues."

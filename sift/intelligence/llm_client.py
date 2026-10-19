@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
@@ -15,6 +15,7 @@ litellm.suppress_debug_info = True
 from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, REVIEW_FILE_SYSTEM_EXTENDED_THINKING, TEST_FILE_APPENDIX
+from sift.intelligence.rate_limit import call_with_limits, endpoint_key
 from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
@@ -260,7 +261,9 @@ def litellm_kwargs(
     Ollama's OpenAI-compatible ``/v1`` API: LiteLLM's model map doesn't know Ollama model
     ids (a bare id has no provider at all), and its native ``ollama_chat`` route mangles
     tool-call history. ``openai/`` here selects the request *format*, not the model vendor.
-    Exceptions (429/5xx/timeouts) are retried by LiteLLM itself via ``num_retries``.
+    ``num_retries=0``: LiteLLM (and the OpenAI SDK under it) must not retry, because it would
+    sleep while holding a limiter slot. 429/5xx/timeouts are retried by
+    ``rate_limit.call_with_limits``, which every ``acompletion`` call site goes through.
     """
     from sift.intelligence.capability import is_ollama_endpoint, ollama_model_name
 
@@ -272,7 +275,7 @@ def litellm_kwargs(
         "api_base": resolved_base,
         "api_key": resolved_key,
         "timeout": config.LLM_TIMEOUT,
-        "num_retries": config.SIFT_LLM_NUM_RETRIES,
+        "num_retries": 0,
     }
     if resolved_base and is_ollama_endpoint(resolved_model, resolved_base, resolved_key):
         base = resolved_base.rstrip("/")
@@ -330,7 +333,6 @@ async def _call_llm(
     # string messages (no Anthropic cache_control): it's for OpenRouter/gateways, not direct
     # Anthropic.
     if resolved_key and resolved_base and not routed_to_ollama:
-        import asyncio as _asyncio
         effective_user = user_content if cache_user_prefix is None else f"{cache_user_prefix}{user_content}"
         raw_model = resolved_model.split("/", 1)[-1] if "/" in resolved_model else resolved_model
         base = resolved_base.rstrip("/")
@@ -346,30 +348,16 @@ async def _call_llm(
             "temperature": temperature,
         }
         headers = {"Authorization": f"Bearer {resolved_key}"}
-        for attempt in range(5):
-            try:
-                async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
-                    resp = await client.post(url, json=payload, headers=headers)
-            except httpx.RequestError as e:
-                # Connection/timeout — transient, back off and retry.
-                if attempt == 4:
-                    raise
-                wait = 2 ** attempt
-                logger.debug("LLM transport error (%s), retrying in %ss", e, wait)
-                await _asyncio.sleep(wait)
-                continue
-            # Retry on rate-limit and any 5xx (transient upstream failures).
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < 4:
-                    wait = 2 ** attempt
-                    logger.debug(
-                        "LLM %s, retrying in %ss", resp.status_code, wait
-                    )
-                    await _asyncio.sleep(wait)
-                    continue
+
+        async def _post() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            # 429 / 5xx raise HTTPStatusError, which call_with_limits retries.
             resp.raise_for_status()
-            return (resp.json()["choices"][0]["message"]["content"] or "").strip()
-        resp.raise_for_status()  # final attempt exhausted
+            return resp
+
+        resp = await call_with_limits(endpoint_key(kwargs), _post)
+        return (resp.json()["choices"][0]["message"]["content"] or "").strip()
 
     kwargs["messages"] = build_messages(
         system, user_content, resolved_model, cache_user_prefix=cache_user_prefix
@@ -383,14 +371,20 @@ async def _call_llm(
         kwargs["temperature"] = 1.0
         kwargs["max_tokens"] = 16000
     import asyncio as _asyncio
-    # Exceptions are retried inside LiteLLM (num_retries); this loop only covers what LiteLLM
-    # can't see — an empty body with an error/length finish_reason (LiteLLM maps upstream
+    # Exceptions are retried by call_with_limits; this loop only covers what an exception
+    # can't signal — an empty body with an error/length finish_reason (LiteLLM maps upstream
     # 'error' to 'stop'), which is a transient upstream failure.
+    limiter_key = endpoint_key(kwargs)
     for attempt in range(3):
-        response = await acompletion(**kwargs)
+        response = await call_with_limits(limiter_key, lambda: acompletion(**kwargs))
         record_response(resolved_model, response)
         finish = getattr(response.choices[0], "finish_reason", None)
         content = response.choices[0].message.content or ""
+        if finish == "length" and content.strip():
+            logger.warning(
+                "LLM output truncated (finish_reason=length, %d chars) for model %s",
+                len(content), resolved_model,
+            )
         if not content.strip() and finish in ("error", "length") and attempt < 2:
             wait = 2 ** attempt
             logger.debug(
@@ -585,12 +579,44 @@ def _extract_json_array(raw: str) -> Optional[List[Any]]:
         end = _balanced_array_end(text, start)
         if end > 0:
             try:
-                parsed = json.loads(text[start:end])
+                # strict=False: accept raw newlines/tabs inside strings, which models emit.
+                parsed = json.loads(text[start:end], strict=False)
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, list):
                 return parsed
         search_from = start + 1
+
+
+def _salvage_truncated_array(raw: str) -> Optional[List[Dict[str, Any]]]:
+    """Recover the complete finding objects from a JSON array cut off mid-stream.
+
+    Output-length limits and dropped streams leave an array with no closing ']', which
+    _extract_json_array rejects. Starting after each '[', decode consecutive '{…}' objects
+    until the first incomplete one. Only objects carrying a "line" key count, so a stray
+    bracket in prose can't become a finding. Returns None when nothing is recovered.
+    """
+    text = _strip_thinking_blocks(raw) or raw
+    decoder = json.JSONDecoder(strict=False)
+    start = text.find("[")
+    while start >= 0:
+        items: List[Dict[str, Any]] = []
+        i = start + 1
+        while True:
+            while i < len(text) and text[i] in " \t\r\n,":
+                i += 1
+            if i >= len(text) or text[i] != "{":
+                break
+            try:
+                obj, i = decoder.raw_decode(text, i)
+            except json.JSONDecodeError:
+                break
+            if isinstance(obj, dict) and "line" in obj:
+                items.append(obj)
+        if items:
+            return items
+        start = text.find("[", start + 1)
+    return None
 
 
 def _items_to_comments(arr: List[Any], path: str) -> List[Dict[str, Any]]:
@@ -651,19 +677,37 @@ def _parse_review_file_response(raw: str, path: str) -> List[Dict[str, Any]]:
     if not raw or not raw.strip():
         return []
     text = raw.strip()
+    structured = _parse_structured_response(text, path)
+    if structured is not None:
+        return structured
+    return _parse_unstructured_response(text, path)
 
-    # Try structured JSON first
+
+def _parse_structured_response(text: str, path: str) -> Optional[List[Dict[str, Any]]]:
+    """Comments from a JSON array (complete or truncated), or None when there is none.
+
+    A successful JSON parse is authoritative: it is returned even when empty (no
+    findings, or all items filtered as low-confidence). Only None — NO JSON array
+    extractable at all — sends the caller to the tab/line-ref fallbacks.
+    """
     arr = _extract_json_array(text)
-    if arr is not None and isinstance(arr, list):
-        # A successful JSON parse is authoritative: return it directly even when
-        # empty (no findings, or all items filtered as low-confidence). Only fall
-        # through to the tab/line-ref fallbacks when NO JSON array was extractable
-        # at all (arr is None) — the case those fallbacks were designed for.
+    if arr is not None:
         return _items_to_comments(arr, path)
+    salvaged = _salvage_truncated_array(text)
+    if salvaged:
+        logger.warning(
+            "Review output for %s was a truncated JSON array; salvaged %d complete finding(s)",
+            path, len(salvaged),
+        )
+        return _items_to_comments(salvaged, path)
+    return None
 
+
+def _parse_unstructured_response(raw: str, path: str) -> List[Dict[str, Any]]:
+    """Fallback parsers for output with no JSON array: tab-format, then "Line N:" refs."""
     # The fallbacks scan the reasoning-stripped text so a "<reasoning>…on line 42…"
     # sentence can never be mistaken for a finding (fabrication hazard).
-    text = _strip_thinking_blocks(text)
+    text = _strip_thinking_blocks(raw)
 
     # Fallback 1: tab-separated format "[L<n>]\t<severity>\t<title>\t<body>"
     # Some models (e.g. qwen3-coder-next) emit this instead of JSON.
@@ -785,10 +829,14 @@ async def parse_with_repair(
     prose/reasoning and never emitted the array). A correct `[]` or an array of
     only low-confidence items counts as compliance and is left as-is.
     """
-    findings = _parse_review_file_response(raw, path)
-    if findings or not raw or not raw.strip():
-        return findings
-    if _extract_json_array(raw) is not None:
+    if not raw or not raw.strip():
+        return []
+    text = raw.strip()
+    structured = _parse_structured_response(text, path)
+    if structured is not None:
+        return structured
+    findings = _parse_unstructured_response(text, path)
+    if findings:
         return findings
     return await _repair_and_parse(raw, path, recall)
 
@@ -1173,17 +1221,61 @@ def _format_off_diff_section(off_diff: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_COVERAGE_LIST_MAX = 50
+
+
+def _format_coverage_section(
+    unreviewed: List[str],
+    skipped: List[Tuple[str, str]],
+) -> str:
+    """Render files the review did not cover, so a partial review never reads as a clean one.
+
+    ``unreviewed``: files whose LLM review failed even after the retry pass (a WARNING —
+    their findings are missing). ``skipped``: (path, reason) pairs deliberately left out
+    (generated/vendored, over the file budget), listed in a collapsed block.
+    """
+    lines: List[str] = []
+    if unreviewed:
+        lines.extend([
+            "",
+            "> [!WARNING]",
+            f"> {len(unreviewed)} file(s) could not be reviewed because the LLM provider kept "
+            "failing (rate limits / errors) after retries. Findings for these files are missing:",
+            ">",
+        ])
+        lines.extend(f"> - `{p}`" for p in unreviewed[:_COVERAGE_LIST_MAX])
+        if len(unreviewed) > _COVERAGE_LIST_MAX:
+            lines.append(f"> - …and {len(unreviewed) - _COVERAGE_LIST_MAX} more")
+        lines.append("")
+    if skipped:
+        lines.extend([
+            "",
+            "<details>",
+            f"<summary>{len(skipped)} file(s) not reviewed (generated, vendored, or over the review budget)</summary>",
+            "",
+        ])
+        lines.extend(f"- `{p}` — {reason}" for p, reason in skipped[:_COVERAGE_LIST_MAX])
+        if len(skipped) > _COVERAGE_LIST_MAX:
+            lines.append(f"- …and {len(skipped) - _COVERAGE_LIST_MAX} more")
+        lines.extend(["", "</details>", ""])
+    return "\n".join(lines)
+
+
 def _build_structured_summary(
     comments: List[Dict[str, Any]],
     off_diff: Optional[List[Dict[str, Any]]] = None,
+    unreviewed: Optional[List[str]] = None,
+    skipped: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     """Build a structured summary with alert blocks and collapsible file details."""
     off_diff = off_diff or []
     off_diff_section = _format_off_diff_section(off_diff)
+    coverage_section = _format_coverage_section(unreviewed or [], skipped or [])
     if not comments:
-        # No inline findings, but off-diff findings still need to be surfaced.
-        if off_diff_section:
-            return "## Sift Review\n\n> No issues on changed lines.\n" + off_diff_section
+        # No inline findings, but off-diff findings / coverage gaps still need to be surfaced.
+        if off_diff_section or coverage_section:
+            head = "No issues on changed lines." if off_diff_section else "No issues found in the reviewed files."
+            return f"## Sift Review\n\n> {head}\n" + coverage_section + off_diff_section
         return "Sifted through the code and found no issues."
 
     counts: Dict[str, int] = {
@@ -1288,6 +1380,8 @@ def _build_structured_summary(
     lines.append("---")
     lines.append("")
     lines.append("*Inline comments with details and suggested fixes are on the Files changed tab.*")
+    if coverage_section:
+        lines.append(coverage_section)
     if off_diff_section:
         lines.append(off_diff_section)
     return "\n".join(lines)
@@ -1296,11 +1390,15 @@ def _build_structured_summary(
 async def summarize_review(
     comments: List[Dict[str, Any]],
     off_diff: Optional[List[Dict[str, Any]]] = None,
+    unreviewed: Optional[List[str]] = None,
+    skipped: Optional[List[Tuple[str, str]]] = None,
 ) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
     `comments` are inline (on-diff) findings rendered as a table. `off_diff`
     findings could not be attached to a changed line (holistic / cross-file) and
     are rendered under a dedicated out-of-scope subheading so they stay visible.
+    `unreviewed` / `skipped` list files the review did not cover (see
+    _format_coverage_section).
     """
-    return _build_structured_summary(comments, off_diff)
+    return _build_structured_summary(comments, off_diff, unreviewed, skipped)

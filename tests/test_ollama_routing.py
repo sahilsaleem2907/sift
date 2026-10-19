@@ -112,7 +112,7 @@ def test_litellm_kwargs_routes_ollama_through_v1(ollama_server):
     assert kw["api_base"] == "https://ollama.com/v1"
     assert kw["api_key"] == "ollama-key"
     assert kw["allowed_openai_params"] == ["reasoning_effort"]
-    assert kw["num_retries"] == 3
+    assert kw["num_retries"] == 0
     assert kw["timeout"] == 300.0
 
 

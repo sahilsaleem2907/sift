@@ -28,6 +28,7 @@ from sift.intelligence.llm_client import (
 )
 from sift.observability.cost import record_response
 from sift.intelligence.prompts import TEST_FILE_APPENDIX
+from sift.intelligence.rate_limit import call_with_limits, endpoint_key
 from sift.intelligence.passes.candidates import generate_candidates
 from sift.intelligence.passes.pipeline import FileReviewInput
 from sift.intelligence.retrieval import FileContext
@@ -340,9 +341,9 @@ async def _call_llm_with_tools(messages: list[dict[str, Any]]) -> Any:
     # no tool_calls; without this guard the loop silently treats that as "no
     # findings". Log the raw response, retry with backoff, then raise so the
     # caller falls back to a deterministic review. Exceptions are already retried
-    # inside LiteLLM (num_retries), so they propagate straight to the caller.
+    # by call_with_limits, so they propagate straight to the caller.
     for attempt in range(3):
-        response = await acompletion(**kwargs)
+        response = await call_with_limits(endpoint_key(kwargs), lambda: acompletion(**kwargs))
         choice = response.choices[0]
         finish = getattr(choice, "finish_reason", None)
         msg = getattr(choice, "message", None)
@@ -382,7 +383,7 @@ async def _call_llm_final(messages: list[dict[str, Any]]) -> str:
     # Otherwise (Ollama) tool_choice is ignored, and the model keeps calling tools it saw in
     # history even when only emit_findings is declared — sending no tools at all is the only
     # reliable way to get a text answer there.
-    response = await acompletion(**kwargs)
+    response = await call_with_limits(endpoint_key(kwargs), lambda: acompletion(**kwargs))
     record_response(config.LLM_MODEL, response)
     return (response.choices[0].message.content or "").strip()
 
@@ -410,7 +411,7 @@ async def _emit_findings_final(messages: list[dict[str, Any]], path: str) -> lis
         "tools": TOOLS + [EMIT_FINDINGS_TOOL],
         "tool_choice": {"type": "function", "function": {"name": "emit_findings"}},
     }
-    response = await acompletion(**kwargs)
+    response = await call_with_limits(endpoint_key(kwargs), lambda: acompletion(**kwargs))
     record_response(config.LLM_MODEL, response)
     tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
     for tc in tool_calls:

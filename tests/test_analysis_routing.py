@@ -6,7 +6,9 @@ from sift.core.analysis_routing import (
     RiskLevel,
     classify_file_type,
     get_tools_for_file,
+    is_generated_or_vendored,
     is_test_path,
+    review_skip_reason,
 )
 
 
@@ -95,3 +97,34 @@ def test_classify_still_treats_test_files_as_code() -> None:
     # is_test is an orthogonal signal; classification is unchanged.
     assert classify_file_type("tests/test_login.py") == FileType.CODE
     assert classify_file_type("pkg/server/server_test.go") == FileType.CODE
+
+
+# --- generated / vendored skip -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "yarn.lock", "uv.lock", "Cargo.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum",
+        "worker-configuration.d.ts", "web/dist/app.js", "static/app.min.js", "a/b.css.map",
+        "proto/user_pb2.py", "api/user.pb.go", "src/api.generated.ts", "vendor/lib/x.go",
+        "web/node_modules/pkg/index.js",
+    ],
+)
+def test_generated_or_vendored(path):
+    assert is_generated_or_vendored(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["src/lock.ts", "src/clock.ts", "build/compile.py", "web/App.tsx", "worker/index.ts", "src/types.d.ts"],
+)
+def test_hand_written_not_skipped(path):
+    assert not is_generated_or_vendored(path)
+    assert review_skip_reason(path) is None
+
+
+def test_skip_globs_match_path_and_basename():
+    assert "gen/*" in review_skip_reason("gen/sub/x.ts", ["gen/*"])
+    assert "*.snap" in review_skip_reason("a/b/c.snap", ["*.snap"])
+    assert review_skip_reason("src/x.ts", ["gen/*", "*.snap"]) is None

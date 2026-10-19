@@ -6,8 +6,9 @@ to reduce analysis time while preserving security coverage on high-risk code.
 """
 import re
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import FrozenSet
+from typing import FrozenSet, Iterable, Optional
 
 # --- File type classification (path-only) ------------------------------------
 
@@ -111,6 +112,52 @@ def is_test_path(path: str) -> bool:
     if _TEST_DIR_PATTERN.search(p) or _TEST_SRC_ROOT_PATTERN.search(p):
         return True
     return bool(_TEST_FILE_PATTERN.search(name))
+
+
+# --- Generated / vendored detection (path-only) -------------------------------
+
+# Machine-written files: reviewing them burns LLM requests on large PRs and any
+# finding there is unactionable (the fix belongs in the generator or upstream).
+_LOCKFILE_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "go.sum",
+})
+_GENERATED_NAMES = frozenset({
+    "worker-configuration.d.ts",  # `wrangler types`
+})
+_GENERATED_SUFFIXES = (
+    ".lock",  # yarn, Cargo, poetry, uv, Pipfile, composer, Gemfile, flake, ...
+    ".min.js", ".min.css", ".map",
+    "_pb2.py", "_pb2_grpc.py", "_pb2.pyi", ".pb.go",
+)
+# Any path segment; "build" is deliberately absent (often hand-written source).
+_VENDORED_DIRS = frozenset({"node_modules", "vendor", "dist", "__generated__"})
+
+
+def is_generated_or_vendored(path: str) -> bool:
+    """True for lockfiles, minified/bundled output, codegen and vendored trees."""
+    p = path.replace("\\", "/").lower().strip()
+    name = Path(p).name
+    if name in _LOCKFILE_NAMES or name in _GENERATED_NAMES:
+        return True
+    if name.endswith(_GENERATED_SUFFIXES) or ".generated." in name:
+        return True
+    return any(seg in _VENDORED_DIRS for seg in p.split("/")[:-1])
+
+
+def review_skip_reason(path: str, extra_globs: Iterable[str] = ()) -> Optional[str]:
+    """Why ``path`` is excluded from review, or None to review it.
+
+    ``extra_globs`` (SIFT_SKIP_PATHS) are fnmatch patterns tried against the full path
+    and the basename, so ``*.snap`` and ``gen/*`` both work.
+    """
+    if is_generated_or_vendored(path):
+        return "generated or vendored"
+    p = path.replace("\\", "/")
+    name = p.rsplit("/", 1)[-1]
+    for glob in extra_globs:
+        if fnmatch(p, glob) or fnmatch(name, glob):
+            return f"matches SIFT_SKIP_PATHS ({glob})"
+    return None
 
 
 # --- Risk scoring (path + content) --------------------------------------------
