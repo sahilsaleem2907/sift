@@ -97,10 +97,25 @@ _VECTOR_EXCLUDE_SAME_FILE_RAW = (os.environ.get("VECTOR_EXCLUDE_SAME_FILE") or "
 VECTOR_EXCLUDE_SAME_FILE = _VECTOR_EXCLUDE_SAME_FILE_RAW in ("1", "true", "yes")
 
 # Concurrency / rate limiting
+# Files prepared/reviewed in parallel (pre-LLM work: context, retrieval, vector search).
 SIFT_MAX_CONCURRENT_REVIEWS = int(os.environ.get("SIFT_MAX_CONCURRENT_REVIEWS") or "10")
+# In-flight LLM requests per endpoint, shared by generator/critic/agentic/holistic. Starting
+# limit for the adaptive limiter (sift/intelligence/rate_limit.py): halves on 429, recovers on success.
+SIFT_LLM_MAX_CONCURRENCY = int(os.environ.get("SIFT_LLM_MAX_CONCURRENCY") or "4")
 SIFT_LLM_REQUEST_DELAY = float(os.environ.get("SIFT_LLM_REQUEST_DELAY") or "0.5")
-# LiteLLM retries (exponential backoff) on rate-limit / transient errors, e.g. Groq 429s
+# Retries (exponential backoff) on transient errors: timeouts, connection errors, 5xx
 SIFT_LLM_NUM_RETRIES = int(os.environ.get("SIFT_LLM_NUM_RETRIES") or "3")
+# Retries on rate-limit (429) errors; backoff happens after releasing the limiter slot
+SIFT_LLM_RATE_LIMIT_RETRIES = int(os.environ.get("SIFT_LLM_RATE_LIMIT_RETRIES") or "6")
+
+# Large-PR budget
+# Extra comma-separated globs (fnmatch, matched against the repo path) to skip from review,
+# on top of the built-in generated/vendored patterns in sift/core/analysis_routing.py.
+SIFT_SKIP_PATHS = [
+    g.strip() for g in (os.environ.get("SIFT_SKIP_PATHS") or "").split(",") if g.strip()
+]
+# Max files sent to LLM review per PR (0 = unlimited). Highest-risk files are kept.
+SIFT_MAX_FILES_PER_REVIEW = int(os.environ.get("SIFT_MAX_FILES_PER_REVIEW") or "0")
 SIFT_GITHUB_COMMENT_DELAY = float(os.environ.get("SIFT_GITHUB_COMMENT_DELAY") or "0.2")
 
 # PR blocking via commit status (default: disabled)

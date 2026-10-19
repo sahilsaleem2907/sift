@@ -5,7 +5,7 @@ This is the core proof that the open-core seam works: a second provider drives
 the entire review pipeline without changing any file in sift/core/.
 """
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -199,3 +199,83 @@ async def test_dummy_forge_drives_run_review() -> None:
     review_comments = forge.posted_reviews[0]["comments"]
     assert len(review_comments) >= 1
     assert review_comments[0]["path"] == "app/calc.py"
+
+
+MULTI_FILE_DIFF = """\
+diff --git a/app/calc.py b/app/calc.py
+--- a/app/calc.py
++++ b/app/calc.py
+@@ -1,2 +1,3 @@
+ x = 1
++y = None
++print(y.upper())
+diff --git a/app/flaky.py b/app/flaky.py
+--- a/app/flaky.py
++++ b/app/flaky.py
+@@ -1,2 +1,3 @@
+ x = 1
++z = 2
++print(z)
+diff --git a/app/broken.py b/app/broken.py
+--- a/app/broken.py
++++ b/app/broken.py
+@@ -1,2 +1,3 @@
+ x = 1
++w = 3
++print(w)
+diff --git a/yarn.lock b/yarn.lock
+--- a/yarn.lock
++++ b/yarn.lock
+@@ -1,2 +1,3 @@
+ # yarn lockfile v1
++left-pad@1.3.0:
++  version "1.3.0"
+"""
+
+
+class MultiFileForge(DummyForge):
+    async def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
+        return MULTI_FILE_DIFF
+
+
+@pytest.mark.asyncio
+async def test_failed_files_are_retried_then_reported_unreviewed() -> None:
+    """A file that fails once is recovered by the sequential retry pass; one that keeps
+    failing is reported as unreviewed (never as "no issues"); lockfiles are skipped."""
+    forge = MultiFileForge()
+    calls: Dict[str, int] = {}
+
+    async def _pipeline(file_input, *args, **kwargs):
+        calls[file_input.path] = calls.get(file_input.path, 0) + 1
+        if file_input.path == "app/broken.py":
+            raise RuntimeError("429 too many concurrent requests")
+        if file_input.path == "app/flaky.py" and calls[file_input.path] == 1:
+            raise RuntimeError("429 too many concurrent requests")
+        return []
+
+    summarize = AsyncMock(return_value="Summary of review.")
+    store = MagicMock(return_value=1)
+    with (
+        patch("sift.core.review_engine.run_pipeline_per_file", new=_pipeline),
+        patch("sift.core.review_engine.summarize_review", new=summarize),
+        patch("sift.core.review_engine.run_linters", return_value={}),
+        patch("sift.core.review_engine.run_semgrep", return_value={}),
+        patch("sift.core.review_engine.scan_diff_for_secrets", return_value=[]),
+        patch("sift.core.review_engine.store_review", new=store),
+        patch("sift.core.review_engine.get_repo_feedback_comment_examples", return_value=[]),
+        patch("sift.core.review_engine.get_avg_quality_score_for_path_pattern", return_value=None),
+        patch("sift.core.review_engine.get_tool_cache_hits", return_value={}),
+        patch("sift.core.review_engine.store_tool_cache"),
+        patch("sift.core.review_engine.resolve_pr_import_graph", return_value={}),
+    ):
+        from sift.core.review_engine import run_review
+
+        await run_review(lambda: forge, "owner", "repo", 1)
+
+    assert calls == {"app/calc.py": 1, "app/flaky.py": 2, "app/broken.py": 2}
+    assert "yarn.lock" not in calls
+    kwargs = summarize.await_args.kwargs
+    assert kwargs["unreviewed"] == ["app/broken.py"]
+    assert [p for p, _ in kwargs["skipped"]] == ["yarn.lock"]
+    stored_paths = store.call_args.kwargs["paths"]
+    assert sorted(stored_paths) == ["app/calc.py", "app/flaky.py"]

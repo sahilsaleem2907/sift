@@ -430,4 +430,5 @@ async def test_agentic_passes_api_key_and_retries():
     for call in fake.await_args_list:
         assert call.kwargs["model"] == "groq/openai/gpt-oss-120b"
         assert call.kwargs["api_key"] == "gsk_test"
-        assert call.kwargs["num_retries"] == 5
+        # Retries live in rate_limit.call_with_limits; LiteLLM must not retry under a slot.
+        assert call.kwargs["num_retries"] == 0

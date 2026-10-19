@@ -19,6 +19,7 @@ from sift.core.analysis_routing import (
     classify_file_type,
     get_tools_for_file,
     is_test_path,
+    review_skip_reason,
     risk_level,
     score_risk_combined,
 )
@@ -234,8 +235,24 @@ async def _run_review_impl(
                     )
 
                 file_chunks = split_diff_by_file(diff)
+                total_files = len(file_chunks)
+                # Files deliberately left out of review, as (path, reason); listed in the summary.
+                skipped_files: List[Tuple[str, str]] = []
+                reviewable_chunks: List[Tuple[str, str]] = []
+                for path, file_diff in file_chunks:
+                    reason = review_skip_reason(path, config.SIFT_SKIP_PATHS)
+                    if reason:
+                        skipped_files.append((path, reason))
+                    else:
+                        reviewable_chunks.append((path, file_diff))
+                if skipped_files:
+                    logger.info(
+                        "Skipping %d of %d file(s) from review: %s",
+                        len(skipped_files), total_files, [p for p, _ in skipped_files],
+                    )
+                file_chunks = reviewable_chunks
                 if not file_chunks:
-                    logger.warning("No file chunks from diff for %s PR #%s", repo_full, pr_number)
+                    logger.warning("No reviewable file chunks from diff for %s PR #%s", repo_full, pr_number)
                     if config.SIFT_BLOCK_PRS_ENABLED:
                         await github.set_commit_status(
                             owner,
@@ -304,6 +321,7 @@ async def _run_review_impl(
                 # Smart routing: classify and score each path; build tool path sets
                 path_to_file_type: Dict[str, FileType] = {}
                 path_to_risk: Dict[str, Any] = {}  # RiskLevel
+                path_to_score: Dict[str, int] = {}
                 path_to_is_test: Dict[str, bool] = {}
                 linter_paths: Set[str] = set()
                 semgrep_paths: Set[str] = set()
@@ -353,6 +371,7 @@ async def _run_review_impl(
                         is_test = is_test_path(path)
                         path_to_file_type[path] = ft
                         path_to_risk[path] = rl
+                        path_to_score[path] = sc
                         path_to_is_test[path] = is_test
                         tools_set = get_tools_for_file(ft, rl, path, is_test=is_test)
                         if "linter" in tools_set:
@@ -391,6 +410,29 @@ async def _run_review_impl(
                     if config.YARN_AUDIT_ENABLED and "yarn.lock" in path_to_content:
                         linter_paths.add("yarn.lock")
 
+                # File budget: keep the highest-risk files that would go to the LLM (docs/assets
+                # are never LLM-reviewed, so they don't count). Ties keep PR order.
+                budget_dropped: Set[str] = set()
+                if config.SIFT_MAX_FILES_PER_REVIEW > 0:
+                    llm_candidates = [
+                        p for p, _ in file_chunks
+                        if path_to_file_type.get(p) not in (FileType.DOCUMENTATION, FileType.ASSETS)
+                    ]
+                    if len(llm_candidates) > config.SIFT_MAX_FILES_PER_REVIEW:
+                        ranked = sorted(llm_candidates, key=lambda p: -path_to_score.get(p, 0))
+                        over_budget = ranked[config.SIFT_MAX_FILES_PER_REVIEW:]
+                        budget_dropped = set(over_budget)
+                        file_chunks = [c for c in file_chunks if c[0] not in budget_dropped]
+                        for tool_paths in (linter_paths, semgrep_paths, codeql_paths, pyright_paths):
+                            tool_paths -= budget_dropped
+                        skipped_files.extend(
+                            (p, "over the file budget (SIFT_MAX_FILES_PER_REVIEW)") for p in over_budget
+                        )
+                        logger.info(
+                            "File budget: reviewing %d highest-risk of %d file(s), skipping %d",
+                            config.SIFT_MAX_FILES_PER_REVIEW, len(llm_candidates), len(over_budget),
+                        )
+
                 if config.SIFT_SMART_ROUTING_ENABLED:
                     linter_input = {p: path_to_content[p] for p in linter_paths if p in path_to_content}
                     semgrep_input = {p: path_to_content[p] for p in semgrep_paths if p in path_to_content}
@@ -399,8 +441,11 @@ async def _run_review_impl(
                         len(linter_input), sorted(linter_input.keys()) if linter_input else [],
                     )
                 else:
-                    semgrep_input = path_to_content if config.SEMGREP_ENABLED else {}
-                    linter_input = path_to_content
+                    reviewed_content = {
+                        p: c for p, c in path_to_content.items() if p not in budget_dropped
+                    }
+                    semgrep_input = reviewed_content if config.SEMGREP_ENABLED else {}
+                    linter_input = reviewed_content
 
                 # Tool result cache: split into cached vs uncached so we only run on misses
                 ttl_hours = config.TOOL_CACHE_TTL_HOURS if config.TOOL_CACHE_ENABLED else 0
@@ -1000,21 +1045,18 @@ async def _run_review_impl(
                         file_diff=file_diff,
                         pr_context=file_pr_context,
                     )
+                    # LLM request concurrency/backoff is enforced per endpoint inside
+                    # rate_limit.call_with_limits; this only bounds per-file work in flight.
+                    # Exceptions propagate so the caller can retry the file and, failing
+                    # that, report it as unreviewed instead of as "no issues".
                     async with _review_sem:
-                        try:
-                            return await run_pipeline_per_file(
-                                file_input,
-                                (pr_context or {}).get("title") or "",
-                                _effort_plan,
-                                _model_cap,
-                                pr_meta_for_files,
-                            )
-                        except Exception as e:
-                            logger.warning("review_file failed for %s: %s", path0, e)
-                            return []
-                        finally:
-                            if config.SIFT_LLM_REQUEST_DELAY > 0:
-                                await asyncio.sleep(config.SIFT_LLM_REQUEST_DELAY)
+                        return await run_pipeline_per_file(
+                            file_input,
+                            (pr_context or {}).get("title") or "",
+                            _effort_plan,
+                            _model_cap,
+                            pr_meta_for_files,
+                        )
 
                 path_diff_lists = list(diff_to_paths.values())
 
@@ -1034,11 +1076,40 @@ async def _run_review_impl(
                 )
 
                 all_findings: List[Finding] = []
-                for result in results:
-                    if isinstance(result, BaseException):
-                        logger.warning("File review task failed: %s", result)
+                failed_lists: List[List[Tuple[str, str]]] = []
+                for pl, result in zip(path_diff_lists, results):
+                    if isinstance(result, Exception):
+                        logger.warning("review_file failed for %s: %s", pl[0][0], result)
+                        failed_lists.append(pl)
+                    elif isinstance(result, BaseException):
+                        raise result
                     else:
                         all_findings.extend(result)
+
+                # Recovery pass: retry failures one at a time, after the limiter has backed
+                # off, so a burst of 429s doesn't silently drop files from a large PR.
+                unreviewed_paths: List[str] = []
+                if failed_lists:
+                    logger.info(
+                        "Retrying %d failed file review(s) sequentially", len(failed_lists)
+                    )
+                    for pl in failed_lists:
+                        try:
+                            all_findings.extend(await _process_file(pl))
+                            logger.info("Recovered review for %s on retry", pl[0][0])
+                        except Exception as e:
+                            logger.warning(
+                                "review_file failed again for %s, marking unreviewed: %s",
+                                pl[0][0], e,
+                            )
+                            unreviewed_paths.extend(p for p, _ in pl)
+                logger.info(
+                    "Review coverage: %d/%d file(s) reviewed, %d unreviewed (LLM errors), %d skipped",
+                    total_files - len(unreviewed_paths) - len(skipped_files),
+                    total_files,
+                    len(unreviewed_paths),
+                    len(skipped_files),
+                )
 
                 pr_meta_full = PRMeta(
                     title=(pr_context or {}).get("title") or "",
@@ -1119,10 +1190,8 @@ async def _run_review_impl(
                 inline_comments = [
                     c for c in on_diff if c.get("post_inline", True)
                 ]
-                summary = (
-                    await summarize_review(inline_comments, off_diff)
-                    if (inline_comments or off_diff)
-                    else "Sifted through the code and found no issues."
+                summary = await summarize_review(
+                    inline_comments, off_diff, unreviewed=unreviewed_paths, skipped=skipped_files
                 )
                 if not summary.strip():
                     summary = "Review completed with inline comments on the Files changed tab."
@@ -1149,7 +1218,7 @@ async def _run_review_impl(
                         0,
                         summary,
                         comment_id=summary_comment_id,
-                        paths=[p for p, _ in file_chunks],
+                        paths=[p for p, _ in file_chunks if p not in unreviewed_paths],
                         candidate_model=config.LLM_MODEL,
                         critic_model=config.SIFT_REVIEW_MODEL or config.LLM_MODEL,
                     )
@@ -1158,6 +1227,8 @@ async def _run_review_impl(
                 if config.SIFT_BLOCK_PRS_ENABLED:
                     should_block, desc = evaluate_block_policy(all_comments)
                     state = "failure" if should_block else "success"
+                    if unreviewed_paths:
+                        desc = f"{desc} ({len(unreviewed_paths)} file(s) not reviewed)"
                     await github.set_commit_status(
                         owner,
                         repo,
