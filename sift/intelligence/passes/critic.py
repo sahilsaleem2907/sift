@@ -265,8 +265,28 @@ async def _critique_with_tools(
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
+    from sift.intelligence.budget import (
+        cap_tool_result,
+        drop_tool_turns,
+        input_budget,
+        overflow_shrink_factor,
+    )
+    from sift.intelligence.capability import review_capability
+
     for step in range(_CRITIC_TOOL_MAX_STEPS):
-        resp = await _acompletion_with_tools(messages, llm_kw, reasoning_effort=reasoning_effort)
+        try:
+            resp = await _acompletion_with_tools(messages, llm_kw, reasoning_effort=reasoning_effort)
+        except Exception as e:
+            if overflow_shrink_factor(e) is None or len(messages) <= 2:
+                raise
+            popped = drop_tool_turns(
+                messages, input_budget(review_capability().context_window, bool(reasoning_effort))
+            )
+            logger.warning(
+                "[critic] tool loop history too long at step %d; dropped %d tool turn(s), "
+                "requesting final verdict", step + 1, popped,
+            )
+            break
         msg = resp.choices[0].message
         md = _message_to_dict(msg)
         messages.append(md)
@@ -284,9 +304,9 @@ async def _critique_with_tools(
             args = _parse_tool_arguments(fn.get("arguments"))
             result = _execute_tool(name, args, path_to_content, mod_funcs, repo_root)
             messages.append(
-                {"role": "tool", "tool_call_id": tc.get("id") or "", "content": result}
+                {"role": "tool", "tool_call_id": tc.get("id") or "", "content": cap_tool_result(result)}
             )
-    # Step budget exhausted — demand a final verdict with no more tool calls.
+    # Step budget exhausted (or history too long) — demand a final verdict with no more tool calls.
     from litellm import acompletion
 
     messages.append({
@@ -310,48 +330,78 @@ async def _critique_with_tools(
         final_kwargs["max_tokens"] = 8192
     resp = await call_with_limits(endpoint_key(final_kwargs), lambda: acompletion(**final_kwargs))
     record_response(llm_kw["model"], resp)
-    logger.info("[critic] tool loop budget (%d) exhausted, final verdict requested", _CRITIC_TOOL_MAX_STEPS)
+    logger.info("[critic] tool loop ended (max %d steps), final verdict requested", _CRITIC_TOOL_MAX_STEPS)
     return resp.choices[0].message.content or ""
 
 
-def _verification_context(pr_context: Optional[dict[str, Any]]) -> str:
+def _verification_context(
+    pr_context: Optional[dict[str, Any]],
+    diff: str = "",
+    budget_tokens: Optional[int] = None,
+) -> str:
     """Bounded code + runtime context so the critic can verify a claim against real code.
 
     Reuses blocks the pipeline already builds (callee bodies, changed-function before/after,
     caller usage) plus the detected runtime target. Empty string when nothing is available —
     the critic then keeps its safe-default behaviour.
+
+    For a new file the before/after is skipped (it repeats the diff). ``budget_tokens``: tokens
+    this context may use; callee → caller → before/after are dropped in that order to fit.
     """
+    from sift.intelligence.budget import Block, fit_blocks, is_new_file_diff
+
     if not pr_context:
         return ""
-    parts: list[str] = []
+    blocks: list[Block] = []
     rt = pr_context.get("runtime_target")
     if rt:
-        parts.append(
+        blocks.append(Block("runtime_target", (
             f"Target runtime: {rt} (authoritative — an API/method/param that exists in this "
             "version is NOT a bug)."
-        )
+        )))
     notes = pr_context.get("external_api_notes")
     if notes:
-        parts.append(notes)
+        blocks.append(Block("external_api_notes", notes))
     sba = pr_context.get("semantic_before_after")
-    if sba and str(sba).strip():
-        parts.append("Changed functions (before/after):\n" + str(sba).strip())
+    if sba and str(sba).strip() and not is_new_file_diff(diff):
+        blocks.append(Block(
+            "semantic_before_after",
+            "Changed functions (before/after):\n" + str(sba).strip(),
+            [(2, "semantic_before_after", "")],
+        ))
     callee = pr_context.get("callee_signatures")
     if callee and str(callee).strip():
-        parts.append("Callee definitions from other PR files:\n" + str(callee).strip())
+        blocks.append(Block(
+            "callee_signatures",
+            "Callee definitions from other PR files:\n" + str(callee).strip(),
+            [(0, "callee_signatures", "")],
+        ))
     caller = pr_context.get("caller_context")
     if caller:
         from sift.intelligence.llm_client import _format_caller_context
         block = _format_caller_context(caller)
         if block:
-            parts.append(block)
-    if not parts:
+            blocks.append(Block("caller_context", block, [(1, "caller_context", "")]))
+    if budget_tokens is not None:
+        blocks, applied = fit_blocks(blocks, budget_tokens)
+        if applied:
+            logger.info("[budget] critic: dropped %s from verification context", applied)
+    if not blocks:
         return ""
     return (
         "\n\nVerification context (check the finding against this real code; "
         "drop it ONLY if this code affirmatively disproves the claim):\n"
-        + "\n\n".join(parts)
+        + "\n\n".join(b.text for b in blocks)
     )
+
+
+def _verify_budget(system: str, fixed_text: str, reasoning_effort: Optional[str]) -> int:
+    """Tokens left for verification context after the critic's system prompt and fixed text."""
+    from sift.intelligence.budget import count_tokens, input_budget
+    from sift.intelligence.capability import review_capability
+
+    budget = input_budget(review_capability().context_window, bool(reasoning_effort))
+    return budget - count_tokens(system) - count_tokens(fixed_text)
 
 
 async def critique_batched(
@@ -380,10 +430,10 @@ async def critique_batched(
         f"     description: {_plain_body(f.body)[:400]}"
         for i, f in enumerate(to_critique)
     )
-    user_content = (
-        f"PR title: {pr_title}\n\nDiff:\n{diff}"
-        f"{_verification_context(pr_context)}\n\nProposed findings:\n{items}"
-    )
+    head = f"PR title: {pr_title}\n\nDiff:\n{diff}"
+    tail = f"\n\nProposed findings:\n{items}"
+    verify_budget = _verify_budget(CRITIC_BATCHED_SYSTEM, head + tail, reasoning_effort)
+    user_content = f"{head}{_verification_context(pr_context, diff, verify_budget)}{tail}"
 
     raw = await _call_llm(
         CRITIC_BATCHED_SYSTEM, user_content, reasoning_effort=reasoning_effort,
@@ -486,7 +536,11 @@ async def critique_per_finding(
     if not to_critique:
         return exempt
 
-    verify_ctx = _verification_context(pr_context)
+    # Per-finding text is capped (description[:400]); 1000 tokens covers it.
+    verify_budget = _verify_budget(
+        CRITIC_FINDING_SYSTEM, f"PR title: {pr_title}\n\nDiff:\n{diff}", reasoning_effort
+    ) - 1000
+    verify_ctx = _verification_context(pr_context, diff, verify_budget)
     # Symmetric tools: let the critic call the same fact-tools to verify before dropping.
     repo_root = (pr_context or {}).get("_repo_root")
     path_to_content = (pr_context or {}).get("_path_to_content") or {}

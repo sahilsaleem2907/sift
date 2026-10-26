@@ -34,6 +34,7 @@ def _node_to_dict(
 
     return {
         "type": node.type,
+        "named": node.is_named,
         "start_line": start_row + 1,
         "end_line": end_row + 1,
         "start_col": start_col,
@@ -56,6 +57,7 @@ def parse_source(
 
     {
         "type": str,
+        "named": bool,  # False for anonymous tokens such as punctuation/keywords
         "start_line": int,
         "end_line": int,
         "start_col": int,

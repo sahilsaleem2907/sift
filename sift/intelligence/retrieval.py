@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _CALL_NAME_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-_CHARS_PER_TOKEN = 4
+_CHARS_PER_TOKEN = 3  # conservative for code; generic tokenizers undercount
 _BUDGET_FRACTION = 0.6
 _MAX_CALLEE_LINES = 5
 _MAX_WINDOW_LINES_WHEN_TRIMMED = 10

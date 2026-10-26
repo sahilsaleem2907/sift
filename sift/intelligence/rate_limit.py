@@ -155,6 +155,24 @@ def _is_transient(exc: BaseException) -> bool:
     return code is not None and code >= 500
 
 
+def permanent_failure_reason(exc: BaseException) -> Optional[str]:
+    """Short reason when the provider will reject this request again unchanged, else None.
+
+    4xx responses other than 408/409/429 (bad request, auth, content policy, context length)
+    are deterministic, so retrying the same file is a wasted call.
+    """
+    from sift.intelligence.budget import overflow_shrink_factor
+
+    if overflow_shrink_factor(exc) is not None:
+        return "prompt exceeds the model's context window"
+    if _is_rate_limit(exc) or _is_transient(exc):
+        return None
+    code = _status_code(exc)
+    if code is not None and 400 <= code < 500 and code not in (408, 409):
+        return f"provider rejected the request ({code})"
+    return None
+
+
 def _retry_after_seconds(exc: BaseException) -> Optional[float]:
     headers: Any = getattr(exc, "litellm_response_headers", None)
     if not headers:

@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
@@ -16,6 +16,9 @@ from sift import config
 from sift.intelligence.ast.diff_ast import get_new_file_plus_line_ranges
 from sift.intelligence.prompts import REVIEW_FILE_SYSTEM, REVIEW_FILE_SYSTEM_EXTENDED_THINKING, TEST_FILE_APPENDIX
 from sift.intelligence.rate_limit import call_with_limits, endpoint_key
+
+if TYPE_CHECKING:
+    from sift.intelligence.budget import Block
 from sift.observability.cost import record_response
 
 logger = logging.getLogger(__name__)
@@ -841,8 +844,12 @@ async def parse_with_repair(
     return await _repair_and_parse(raw, path, recall)
 
 
-def _format_file_context(file_context: Dict[str, Any]) -> str:
-    """Format surrounding file context (read-only) for the LLM: path, line ranges, and numbered lines."""
+def _format_file_context(file_context: Dict[str, Any], full_file: bool = True) -> str:
+    """Format surrounding file context (read-only) for the LLM: path, line ranges, and numbered lines.
+
+    ``full_file=False`` renders only the changed ranges even for small files (the cheaper form
+    used when the prompt is over its context budget).
+    """
     path = file_context.get("path") or "?"
     content = (file_context.get("content") or "").strip()
     ranges = file_context.get("ranges") or []
@@ -852,7 +859,7 @@ def _format_file_context(file_context: Dict[str, Any]) -> str:
     # When the file is small enough, render it in full so the model can verify
     # cross-references (e.g. whether an import is used elsewhere) instead of
     # guessing from excerpts. Above the cap, fall back to the changed ranges only.
-    if len(lines) <= config.SIFT_FULL_FILE_RENDER_MAX_LINES:
+    if full_file and len(lines) <= config.SIFT_FULL_FILE_RENDER_MAX_LINES:
         out_lines: List[str] = [
             "Full file (read-only, for understanding the change):",
             f"File: {path}",
@@ -914,7 +921,7 @@ def _format_ast_diff(ast_diff: Dict[str, Any]) -> str:
     if not nodes:
         return "\n".join(out_lines)
 
-    out_lines.append("AST nodes on changed '+' lines (one per line below):")
+    out_lines.append("Outermost AST nodes on changed '+' lines (one per line below):")
     for n in nodes:
         line = n.get("start_line")
         start_col = n.get("start_col")
@@ -924,6 +931,9 @@ def _format_ast_diff(ast_diff: Dict[str, Any]) -> str:
         out_lines.append(
             f"- line {line}, cols {start_col}-{end_col}, type={node_type}, text={text!r}"
         )
+    omitted = ast_diff.get("omitted") or 0
+    if omitted:
+        out_lines.append(f"- … ({omitted} more node(s) omitted)")
 
     return "\n".join(out_lines)
 
@@ -1014,94 +1024,107 @@ def _format_similar_snippets(matches: List[Any]) -> str:
     return "\n".join(lines)
 
 
-async def review_file(
+# PR description length kept when the prompt is over budget (the last reduction before chunking).
+_PR_BODY_BUDGET_CHARS = 2000
+
+
+def review_file_system_prompt(pr_context: Optional[Dict[str, Any]], reasoning: bool) -> str:
+    base = REVIEW_FILE_SYSTEM_EXTENDED_THINKING if reasoning else REVIEW_FILE_SYSTEM
+    return base + (TEST_FILE_APPENDIX if (pr_context or {}).get("is_test") else "")
+
+
+def build_review_blocks(
     diff_chunk: str,
     path: str,
     pr_context: Optional[Dict[str, Any]] = None,
-    reasoning_effort: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Review a single file's diff; return list of {line, body} for inline comments.
+) -> List["Block"]:
+    """The review_file user prompt as ordered blocks, each with its allowed budget reductions.
 
-    path is for logging; we do not rely on LLM for path. Line is the line number in the new file (right side).
+    Drop order when over budget: similar snippets → AST → caller context → callee definitions →
+    before/after → full file downgraded to changed ranges → file context → PR body capped.
+    Runtime target, footgun notes, static-tool findings, feedback examples, the PR title and
+    the diff are never reduced. For a new file the full-file render and before/after are skipped
+    outright: the annotated diff already carries every line with its number.
     """
-    user_parts = []
-    if pr_context:
-        runtime_target = pr_context.get("runtime_target")
-        if runtime_target:
-            user_parts.append(
-                f"Target runtime for this file: {runtime_target} — this is the repo's declared "
-                "target and is AUTHORITATIVE. Assume every API, method, and parameter available in "
-                "this version exists. Do NOT flag an API as missing/unavailable if it exists in this "
-                "version, and do NOT add hypothetical 'if this runs on an older version' caveats — "
-                "the target IS this version."
-            )
-        external_api_notes = pr_context.get("external_api_notes")
-        if external_api_notes:
-            user_parts.append(external_api_notes)
-        file_context = pr_context.get("file_context")
-        if file_context:
-            fc_block = _format_file_context(file_context)
-            if fc_block:
-                user_parts.append(fc_block)
-        semgrep_findings = pr_context.get("semgrep_findings") or []
-        semgrep_block = _format_semgrep_findings(semgrep_findings)
-        if semgrep_block:
-            user_parts.append(semgrep_block)
-        codeql_findings = pr_context.get("codeql_findings") or []
-        codeql_block = _format_codeql_findings(codeql_findings)
-        if codeql_block:
-            user_parts.append(codeql_block)
-        ast_diff = pr_context.get("ast_diff")
-        if ast_diff:
-            try:
-                user_parts.append(
-                    "Structured AST metadata from tree-sitter for this file, "
-                    "restricted to nodes whose line ranges fall fully within new '+' diff lines.\n"
-                    "Use this as structural context, not as full source code. "
-                    "The following list shows AST nodes on changed lines with their spans and source text:\n"
-                    f"{_format_ast_diff(ast_diff)}"
-                )
-            except TypeError as e:
-                logger.debug("Failed to serialize ast_diff for %s: %s", path, e)
-        linter_issues = pr_context.get("linter_issues") or []
-        linter_block = _format_linter_issues(linter_issues)
-        if linter_block:
-            user_parts.append(linter_block)
-            logger.debug(
-                "LLM linter_issues input: file=%s, count=%d, block_preview=%s",
-                path,
-                len(linter_issues),
-                linter_block[:500] + "..." if len(linter_block) > 500 else linter_block,
-            )
-        title = pr_context.get("title") or ""
-        body = pr_context.get("body") or ""
-        if title or body:
-            user_parts.append(f"PR title: {title}\n\nPR description: {body}")
+    from sift.intelligence.budget import Block, is_new_file_diff
 
-    labeled_comments = (pr_context or {}).get("repo_feedback_labeled_comments")
-    if labeled_comments:
-        lc_block = _format_repo_preferences(labeled_comments)
-        if lc_block:
-            user_parts.append(lc_block)
+    ctx = pr_context or {}
+    new_file = is_new_file_diff(diff_chunk)
+    blocks: List[Block] = []
 
-    caller_context = (pr_context or {}).get("caller_context")
-    if caller_context:
-        cc_block = _format_caller_context(caller_context)
-        if cc_block:
-            user_parts.append(cc_block)
+    def add(name: str, text: str, *steps: Tuple[int, str]) -> None:
+        if text and text.strip():
+            blocks.append(Block(name, text, [(rank, name if not repl else f"{name}:reduced", repl) for rank, repl in steps]))
 
-    semantic_ba = (pr_context or {}).get("semantic_before_after")
-    if semantic_ba and str(semantic_ba).strip():
-        user_parts.append(
-            "Semantic before/after of changed functions in this file:\n"
-            + str(semantic_ba).strip()
+    runtime_target = ctx.get("runtime_target")
+    if runtime_target:
+        add(
+            "runtime_target",
+            f"Target runtime for this file: {runtime_target} — this is the repo's declared "
+            "target and is AUTHORITATIVE. Assume every API, method, and parameter available in "
+            "this version exists. Do NOT flag an API as missing/unavailable if it exists in this "
+            "version, and do NOT add hypothetical 'if this runs on an older version' caveats — "
+            "the target IS this version.",
         )
-
-    callee_sigs = (pr_context or {}).get("callee_signatures")
+    add("external_api_notes", ctx.get("external_api_notes") or "")
+    file_context = ctx.get("file_context")
+    if file_context and not new_file:
+        add(
+            "file_context",
+            _format_file_context(file_context),
+            (5, _format_file_context(file_context, full_file=False)),
+            (6, ""),
+        )
+    add("semgrep", _format_semgrep_findings(ctx.get("semgrep_findings") or []))
+    add("codeql", _format_codeql_findings(ctx.get("codeql_findings") or []))
+    ast_diff = ctx.get("ast_diff")
+    if ast_diff:
+        try:
+            add(
+                "ast_diff",
+                "Structured AST metadata from tree-sitter for this file, "
+                "restricted to nodes whose line ranges fall fully within new '+' diff lines.\n"
+                "Use this as structural context, not as full source code. "
+                "The following list shows AST nodes on changed lines with their spans and source text:\n"
+                f"{_format_ast_diff(ast_diff)}",
+                (1, ""),
+            )
+        except TypeError as e:
+            logger.debug("Failed to serialize ast_diff for %s: %s", path, e)
+    linter_issues = ctx.get("linter_issues") or []
+    linter_block = _format_linter_issues(linter_issues)
+    if linter_block:
+        add("linter", linter_block)
+        logger.debug(
+            "LLM linter_issues input: file=%s, count=%d, block_preview=%s",
+            path,
+            len(linter_issues),
+            linter_block[:500] + "..." if len(linter_block) > 500 else linter_block,
+        )
+    title = ctx.get("title") or ""
+    body = ctx.get("body") or ""
+    if title or body:
+        capped = body if len(body) <= _PR_BODY_BUDGET_CHARS else (
+            body[:_PR_BODY_BUDGET_CHARS] + "\n… (description truncated for context budget)"
+        )
+        add("pr", f"PR title: {title}\n\nPR description: {body}", (7, f"PR title: {title}\n\nPR description: {capped}"))
+    add("repo_feedback", _format_repo_preferences(ctx.get("repo_feedback_labeled_comments") or ""))
+    caller_context = ctx.get("caller_context")
+    if caller_context:
+        add("caller_context", _format_caller_context(caller_context), (2, ""))
+    semantic_ba = ctx.get("semantic_before_after")
+    if semantic_ba and str(semantic_ba).strip() and not new_file:
+        add(
+            "semantic_before_after",
+            "Semantic before/after of changed functions in this file:\n" + str(semantic_ba).strip(),
+            (4, ""),
+        )
+    callee_sigs = ctx.get("callee_signatures")
     if callee_sigs and str(callee_sigs).strip():
-        user_parts.append(
-            "Callee definitions from other files in this PR:\n"
-            + str(callee_sigs).strip()
+        add(
+            "callee_signatures",
+            "Callee definitions from other files in this PR:\n" + str(callee_sigs).strip(),
+            (3, ""),
         )
 
     diff_intro = (
@@ -1109,20 +1132,65 @@ async def review_file(
         "Diff (legend: '-' = old/removed, '+' = new/added). Each added line is annotated with [L<n>] — use that integer as \"line\" in your JSON."
     )
     diff_intro += "\n\n"
-    annotated_diff = _annotate_diff_with_line_numbers(diff_chunk, path)
-    user_parts.append(diff_intro + annotated_diff)
+    add("diff", diff_intro + _annotate_diff_with_line_numbers(diff_chunk, path))
 
-    similar_snippets = (pr_context or {}).get("similar_snippets")
+    similar_snippets = ctx.get("similar_snippets")
     if similar_snippets:
         sim_block = _format_similar_snippets(similar_snippets)
         if sim_block:
-            user_parts.append(sim_block)
+            add("similar_snippets", sim_block, (0, ""))
             logger.debug(
                 "[Vector] path=%s: appended similar_snippets block to prompt (%d match(es), %d chars)",
                 path, len(similar_snippets), len(sim_block),
             )
+    return blocks
 
-    user_content = "\n\n---\n\n".join(user_parts)
+
+def min_review_prompt_tokens(
+    diff_chunk: str,
+    path: str,
+    pr_context: Optional[Dict[str, Any]],
+    reasoning: bool,
+) -> Tuple[int, int]:
+    """(tokens of the smallest review_file prompt for this diff, tokens of its diff block).
+
+    The smallest prompt has every reducible block reduced; the pipeline compares it with the
+    budget to decide whether the diff must be split into chunks.
+    """
+    from sift.intelligence.budget import count_tokens, fit_blocks
+
+    blocks = build_review_blocks(diff_chunk, path, pr_context)
+    reduced, _ = fit_blocks(blocks, budget=0)
+    diff_tokens = sum(count_tokens(b.text) for b in reduced if b.name == "diff")
+    total = count_tokens(review_file_system_prompt(pr_context, reasoning)) + sum(
+        count_tokens(b.text) for b in reduced
+    )
+    return total, diff_tokens
+
+
+async def review_file(
+    diff_chunk: str,
+    path: str,
+    pr_context: Optional[Dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
+    context_window: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Review a single file's diff; return list of {line, body} for inline comments.
+
+    path is for logging; we do not rely on LLM for path. Line is the line number in the new file (right side).
+    ``context_window``: when given, optional context blocks are reduced (see build_review_blocks)
+    until the prompt fits the model's input budget.
+    """
+    from sift.intelligence.budget import count_tokens, fit_blocks, input_budget
+
+    system_prompt = review_file_system_prompt(pr_context, bool(reasoning_effort))
+    blocks = build_review_blocks(diff_chunk, path, pr_context)
+    if context_window:
+        budget = input_budget(context_window, bool(reasoning_effort))
+        blocks, applied = fit_blocks(blocks, budget, overhead_tokens=count_tokens(system_prompt))
+        if applied:
+            logger.info("[budget] %s: reduced %s to fit %d-token input budget", path, applied, budget)
+    user_content = "\n\n---\n\n".join(b.text for b in blocks)
 
     semgrep_findings = (pr_context or {}).get("semgrep_findings") or []
     linter_issues = (pr_context or {}).get("linter_issues") or []
@@ -1140,8 +1208,6 @@ async def review_file(
         logger.debug("CodeQL findings for %s: %s", path, codeql_findings)
     logger.debug("LLM input full payload for %s:\n%s", path, user_content)
 
-    _base = REVIEW_FILE_SYSTEM_EXTENDED_THINKING if reasoning_effort else REVIEW_FILE_SYSTEM
-    system_prompt = _base + (TEST_FILE_APPENDIX if (pr_context or {}).get("is_test") else "")
     raw = await _call_llm(system_prompt, user_content, reasoning_effort=reasoning_effort)
     logger.debug("LLM raw output for %s:\n%s", path, raw)
 
@@ -1227,23 +1293,29 @@ _COVERAGE_LIST_MAX = 50
 def _format_coverage_section(
     unreviewed: List[str],
     skipped: List[Tuple[str, str]],
+    unreviewed_reasons: Optional[Dict[str, str]] = None,
 ) -> str:
     """Render files the review did not cover, so a partial review never reads as a clean one.
 
-    ``unreviewed``: files whose LLM review failed even after the retry pass (a WARNING —
-    their findings are missing). ``skipped``: (path, reason) pairs deliberately left out
-    (generated/vendored, over the file budget), listed in a collapsed block.
+    ``unreviewed``: files whose LLM review failed (a WARNING — their findings are missing),
+    with an optional per-file reason in ``unreviewed_reasons``. ``skipped``: (path, reason)
+    pairs deliberately left out (generated/vendored, over the file budget), listed in a
+    collapsed block.
     """
+    reasons = unreviewed_reasons or {}
     lines: List[str] = []
     if unreviewed:
         lines.extend([
             "",
             "> [!WARNING]",
-            f"> {len(unreviewed)} file(s) could not be reviewed because the LLM provider kept "
-            "failing (rate limits / errors) after retries. Findings for these files are missing:",
+            f"> {len(unreviewed)} file(s) could not be reviewed due to LLM provider errors. "
+            "Findings for these files are missing:",
             ">",
         ])
-        lines.extend(f"> - `{p}`" for p in unreviewed[:_COVERAGE_LIST_MAX])
+        lines.extend(
+            f"> - `{p}` — {reasons[p]}" if reasons.get(p) else f"> - `{p}`"
+            for p in unreviewed[:_COVERAGE_LIST_MAX]
+        )
         if len(unreviewed) > _COVERAGE_LIST_MAX:
             lines.append(f"> - …and {len(unreviewed) - _COVERAGE_LIST_MAX} more")
         lines.append("")
@@ -1266,11 +1338,12 @@ def _build_structured_summary(
     off_diff: Optional[List[Dict[str, Any]]] = None,
     unreviewed: Optional[List[str]] = None,
     skipped: Optional[List[Tuple[str, str]]] = None,
+    unreviewed_reasons: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build a structured summary with alert blocks and collapsible file details."""
     off_diff = off_diff or []
     off_diff_section = _format_off_diff_section(off_diff)
-    coverage_section = _format_coverage_section(unreviewed or [], skipped or [])
+    coverage_section = _format_coverage_section(unreviewed or [], skipped or [], unreviewed_reasons)
     if not comments:
         # No inline findings, but off-diff findings / coverage gaps still need to be surfaced.
         if off_diff_section or coverage_section:
@@ -1392,6 +1465,7 @@ async def summarize_review(
     off_diff: Optional[List[Dict[str, Any]]] = None,
     unreviewed: Optional[List[str]] = None,
     skipped: Optional[List[Tuple[str, str]]] = None,
+    unreviewed_reasons: Optional[Dict[str, str]] = None,
 ) -> str:
     """Produce a structured summary for the Conversation tab: status counts and comments by file.
 
@@ -1401,4 +1475,4 @@ async def summarize_review(
     `unreviewed` / `skipped` list files the review did not cover (see
     _format_coverage_section).
     """
-    return _build_structured_summary(comments, off_diff, unreviewed, skipped)
+    return _build_structured_summary(comments, off_diff, unreviewed, skipped, unreviewed_reasons)

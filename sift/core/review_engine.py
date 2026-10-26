@@ -36,6 +36,7 @@ from sift.feedback.preferences import format_labeled_comment_examples
 from sift.intelligence.effort import current_plan
 from sift.intelligence.capability import primary_capability
 from sift.intelligence.llm_client import summarize_review
+from sift.intelligence.rate_limit import permanent_failure_reason
 from sift.intelligence.passes.pipeline import (
     FileReviewInput,
     PRMeta,
@@ -1077,10 +1078,19 @@ async def _run_review_impl(
 
                 all_findings: List[Finding] = []
                 failed_lists: List[List[Tuple[str, str]]] = []
+                unreviewed_paths: List[str] = []
+                unreviewed_reasons: Dict[str, str] = {}
                 for pl, result in zip(path_diff_lists, results):
                     if isinstance(result, Exception):
                         logger.warning("review_file failed for %s: %s", pl[0][0], result)
-                        failed_lists.append(pl)
+                        reason = permanent_failure_reason(result)
+                        if reason:
+                            # Deterministic rejection: a retry would fail the same way.
+                            for fp, _ in pl:
+                                unreviewed_paths.append(fp)
+                                unreviewed_reasons[fp] = reason
+                        else:
+                            failed_lists.append(pl)
                     elif isinstance(result, BaseException):
                         raise result
                     else:
@@ -1088,7 +1098,6 @@ async def _run_review_impl(
 
                 # Recovery pass: retry failures one at a time, after the limiter has backed
                 # off, so a burst of 429s doesn't silently drop files from a large PR.
-                unreviewed_paths: List[str] = []
                 if failed_lists:
                     logger.info(
                         "Retrying %d failed file review(s) sequentially", len(failed_lists)
@@ -1102,7 +1111,10 @@ async def _run_review_impl(
                                 "review_file failed again for %s, marking unreviewed: %s",
                                 pl[0][0], e,
                             )
-                            unreviewed_paths.extend(p for p, _ in pl)
+                            reason = permanent_failure_reason(e) or "LLM provider kept failing after retries"
+                            for fp, _ in pl:
+                                unreviewed_paths.append(fp)
+                                unreviewed_reasons[fp] = reason
                 logger.info(
                     "Review coverage: %d/%d file(s) reviewed, %d unreviewed (LLM errors), %d skipped",
                     total_files - len(unreviewed_paths) - len(skipped_files),
@@ -1191,7 +1203,8 @@ async def _run_review_impl(
                     c for c in on_diff if c.get("post_inline", True)
                 ]
                 summary = await summarize_review(
-                    inline_comments, off_diff, unreviewed=unreviewed_paths, skipped=skipped_files
+                    inline_comments, off_diff, unreviewed=unreviewed_paths, skipped=skipped_files,
+                    unreviewed_reasons=unreviewed_reasons,
                 )
                 if not summary.strip():
                     summary = "Review completed with inline comments on the Files changed tab."
