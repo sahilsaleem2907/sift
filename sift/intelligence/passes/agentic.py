@@ -473,9 +473,22 @@ async def agentic_review(
     mod_funcs_by_path: Optional[dict[str, list[FunctionChunk]]] = None,
     retrieval_ctx: Optional[FileContext] = None,
     repo_root: Optional[str] = None,
+    context_window: Optional[int] = None,
 ) -> list[Finding]:
-    """Run a bounded tool-calling loop; fall back to generate_candidates on failure."""
+    """Run a bounded tool-calling loop; fall back to generate_candidates on failure.
+
+    Tool results are capped, and if the provider rejects the growing history as too long the
+    latest tool turns are dropped and the final answer is requested from what remains.
+    """
+    from sift.intelligence.budget import (
+        cap_tool_result,
+        drop_tool_turns,
+        input_budget,
+        overflow_shrink_factor,
+    )
+
     _ = plan
+    context_window = context_window or cap.context_window
     path = file_input.path
     file_diff = file_input.file_diff
     pr_context = file_input.pr_context or {}
@@ -529,7 +542,17 @@ async def agentic_review(
 
     try:
         for step in range(max_steps):
-            response = await _call_llm_with_tools(messages)
+            try:
+                response = await _call_llm_with_tools(messages)
+            except Exception as e:
+                if overflow_shrink_factor(e) is None or len(messages) <= 2:
+                    raise
+                popped = drop_tool_turns(messages, input_budget(context_window, False))
+                logger.warning(
+                    "[agentic] %s: history too long at step %d; dropped %d tool turn(s), "
+                    "requesting final answer", path, step + 1, popped,
+                )
+                break
             msg = response.choices[0].message
             msg_dict = _message_to_dict(msg)
             messages.append(msg_dict)
@@ -560,7 +583,7 @@ async def agentic_review(
                     {
                         "role": "tool",
                         "tool_call_id": tc.get("id") or "",
-                        "content": result,
+                        "content": cap_tool_result(result),
                     }
                 )
             logger.info(
@@ -569,10 +592,10 @@ async def agentic_review(
                 [(tc.get("function") or {}).get("name") for tc in tool_calls],
             )
 
-        # Budget exhausted: get the final answer deterministically (emit tool when
-        # supported; free-text + repair otherwise). Each tier appends its own "submit
-        # now" instruction, so no extra prompt is needed here.
-        logger.info("[agentic] %s: step budget (%d) exhausted, requesting final answer", path, max_steps)
+        # Step budget exhausted (or history too long): get the final answer deterministically
+        # (emit tool when supported; free-text + repair otherwise). Each tier appends its own
+        # "submit now" instruction, so no extra prompt is needed here.
+        logger.info("[agentic] %s: step loop ended, requesting final answer", path)
         comments = await _final_comments(messages, path, cap)
         return _comments_to_findings(comments, path)
 
@@ -582,4 +605,6 @@ async def agentic_review(
             path,
             e,
         )
-        return await generate_candidates(file_diff, path, pr_context)
+        return await generate_candidates(
+            file_diff, path, pr_context, context_window=context_window
+        )

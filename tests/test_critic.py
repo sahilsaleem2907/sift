@@ -247,3 +247,45 @@ def test_clamp_leaves_unrelated_correctness_speculative():
     """A plain correctness finding with no concurrency language is unaffected."""
     out = _clamp_certainty_for_critic([_speculative("correctness")])
     assert out[0].certainty == Certainty.SPECULATIVE
+
+
+@pytest.mark.asyncio
+async def test_critic_tool_loop_overflow_drops_tool_turns_then_asks_for_verdict(monkeypatch):
+    """If the provider rejects the growing tool history as too long, the critic drops the latest
+    tool turn and requests its final verdict instead of failing the file."""
+    import litellm
+
+    tc = MagicMock()
+    tc.id = "tc1"
+    tc.function = MagicMock()
+    tc.function.name = "get_file"
+    tc.function.arguments = '{"path": "app/x.py"}'
+    tool_msg = MagicMock(content=None, tool_calls=[tc], role="assistant")
+    final_msg = MagicMock(content='{"verdict": "keep", "reason": "ok"}', tool_calls=None, role="assistant")
+    sent: list[list[dict]] = []
+
+    async def _llm(**kwargs):
+        sent.append(list(kwargs["messages"]))
+        if len(sent) == 2:
+            raise litellm.BadRequestError(
+                message="The prompt is too long: 140000, model maximum context length: 131072",
+                model="openai/x", llm_provider="openai",
+            )
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=tool_msg if len(sent) == 1 else final_msg)]
+        return resp
+
+    monkeypatch.setattr(litellm, "acompletion", _llm)
+    out = await _critique_with_tools(
+        system="sys",
+        user_content="u",
+        llm_kw={"model": "openai/x", "api_base": None, "api_key": None},
+        repo_root="/tmp",
+        path_to_content={"app/x.py": "x = 1\n"},
+        mod_funcs={},
+    )
+
+    assert out == '{"verdict": "keep", "reason": "ok"}'
+    assert len(sent) == 3
+    # The final request carries no tool turns: system, user, then the "final verdict" instruction.
+    assert [m["role"] for m in sent[2]] == ["system", "user", "user"]

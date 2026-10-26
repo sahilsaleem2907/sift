@@ -279,3 +279,48 @@ async def test_failed_files_are_retried_then_reported_unreviewed() -> None:
     assert [p for p, _ in kwargs["skipped"]] == ["yarn.lock"]
     stored_paths = store.call_args.kwargs["paths"]
     assert sorted(stored_paths) == ["app/calc.py", "app/flaky.py"]
+
+
+@pytest.mark.asyncio
+async def test_permanent_llm_errors_are_not_retried_and_report_a_reason() -> None:
+    """A deterministic 4xx (e.g. context length) skips the sequential retry pass and is
+    reported with its reason; a 429 is still retried."""
+    import litellm
+
+    forge = MultiFileForge()
+    calls: Dict[str, int] = {}
+
+    async def _pipeline(file_input, *args, **kwargs):
+        calls[file_input.path] = calls.get(file_input.path, 0) + 1
+        if file_input.path == "app/broken.py":
+            raise litellm.BadRequestError(
+                message="OpenAIException - The prompt is too long: 147021, model maximum context length: 131072",
+                model="openai/x",
+                llm_provider="openai",
+            )
+        if file_input.path == "app/flaky.py" and calls[file_input.path] == 1:
+            raise RuntimeError("429 too many concurrent requests")
+        return []
+
+    summarize = AsyncMock(return_value="Summary of review.")
+    with (
+        patch("sift.core.review_engine.run_pipeline_per_file", new=_pipeline),
+        patch("sift.core.review_engine.summarize_review", new=summarize),
+        patch("sift.core.review_engine.run_linters", return_value={}),
+        patch("sift.core.review_engine.run_semgrep", return_value={}),
+        patch("sift.core.review_engine.scan_diff_for_secrets", return_value=[]),
+        patch("sift.core.review_engine.store_review", new=MagicMock(return_value=1)),
+        patch("sift.core.review_engine.get_repo_feedback_comment_examples", return_value=[]),
+        patch("sift.core.review_engine.get_avg_quality_score_for_path_pattern", return_value=None),
+        patch("sift.core.review_engine.get_tool_cache_hits", return_value={}),
+        patch("sift.core.review_engine.store_tool_cache"),
+        patch("sift.core.review_engine.resolve_pr_import_graph", return_value={}),
+    ):
+        from sift.core.review_engine import run_review
+
+        await run_review(lambda: forge, "owner", "repo", 1)
+
+    assert calls == {"app/calc.py": 1, "app/flaky.py": 2, "app/broken.py": 1}
+    kwargs = summarize.await_args.kwargs
+    assert kwargs["unreviewed"] == ["app/broken.py"]
+    assert kwargs["unreviewed_reasons"] == {"app/broken.py": "prompt exceeds the model's context window"}

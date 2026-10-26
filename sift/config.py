@@ -159,6 +159,11 @@ SIFT_COST_TRACKING = _COST_TRACKING_RAW in ("1", "true", "yes")
 # used elsewhere) instead of guessing from excerpts.
 SIFT_FULL_FILE_RENDER_MAX_LINES = int(os.environ.get("SIFT_FULL_FILE_RENDER_MAX_LINES") or "800")
 
+# Fraction of the model's context window a prompt may fill (before the output reservation).
+# Token counts are estimated with a generic tokenizer, which can undercount for the provider's
+# real one; the remaining headroom absorbs that mismatch.
+SIFT_CONTEXT_SAFETY_FACTOR = float(os.environ.get("SIFT_CONTEXT_SAFETY_FACTOR") or "0.85")
+
 
 def validate_required() -> None:
     """Fail fast if required env vars are missing."""

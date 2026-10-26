@@ -7,6 +7,9 @@ from .parser import parse_source
 
 logger = logging.getLogger(__name__)
 
+# Cap on AST nodes sent per file; the annotated diff already carries the code itself.
+_MAX_AST_NODES = 200
+
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 
 
@@ -98,15 +101,42 @@ def _collect_overlapping_nodes(
     node: Dict[str, Any],
     ranges: List[Tuple[int, int]],
     out: List[Dict[str, Any]],
-) -> None:
-    """Collect nodes that overlap diff ranges. Appends shallow copies without children
-    so we only send metadata for lines in the diff, not the full file tree."""
-    if _node_overlaps_ranges(node, ranges):
+) -> int:
+    """Collect the outermost named nodes fully inside the diff ranges, as shallow copies.
+
+    Descendants of a collected node are not collected: their text is already part of it, and
+    emitting every nested node repeats the changed code once per tree depth (a new file's
+    prompt grew ~18x that way). Anonymous tokens (punctuation, keywords) are skipped. Stops at
+    _MAX_AST_NODES; returns how many qualifying nodes were omitted past the cap.
+    """
+    if node.get("named", True) and _node_overlaps_ranges(node, ranges):
+        if len(out) >= _MAX_AST_NODES:
+            return 1
         shallow = {k: v for k, v in node.items() if k != "children"}
         shallow["children"] = []
         out.append(shallow)
+        return 0
+    omitted = 0
     for child in node.get("children") or []:
-        _collect_overlapping_nodes(child, ranges, out)
+        omitted += _collect_overlapping_nodes(child, ranges, out)
+    return omitted
+
+
+def filter_ast_to_range(ast_diff: Optional[Dict[str, Any]], start: int, end: int) -> Optional[Dict[str, Any]]:
+    """Restrict a build_diff_ast result to nodes and ranges within new-file lines [start, end]."""
+    if not ast_diff:
+        return ast_diff
+    nodes = [
+        n for n in ast_diff.get("nodes") or []
+        if start <= (n.get("start_line") or 0) and (n.get("end_line") or 0) <= end
+    ]
+    if not nodes:
+        return None
+    ranges = [
+        r for r in ast_diff.get("changed_ranges") or []
+        if r.get("end_line", 0) >= start and r.get("start_line", 0) <= end
+    ]
+    return {**ast_diff, "nodes": nodes, "changed_ranges": ranges, "omitted": 0}
 
 
 def build_diff_ast(path: str, source: str, diff_chunk: str) -> Optional[Dict[str, Any]]:
@@ -117,7 +147,8 @@ def build_diff_ast(path: str, source: str, diff_chunk: str) -> Optional[Dict[str
             "path": str,
             "lang": str,
             "changed_ranges": [{"start_line": int, "end_line": int}, ...],
-            "nodes": [<normalized AST nodes overlapping changed_ranges>],
+            "nodes": [<outermost named AST nodes inside changed_ranges>],
+            "omitted": int,  # nodes left out past _MAX_AST_NODES
         }
     or None if parsing or language detection fails.
     """
@@ -132,7 +163,7 @@ def build_diff_ast(path: str, source: str, diff_chunk: str) -> Optional[Dict[str
         return None
 
     overlapping: List[Dict[str, Any]] = []
-    _collect_overlapping_nodes(ast_root, ranges, overlapping)
+    omitted = _collect_overlapping_nodes(ast_root, ranges, overlapping)
     if not overlapping:
         logger.debug("No AST nodes overlap diff ranges for %s", path)
         return None
@@ -146,8 +177,9 @@ def build_diff_ast(path: str, source: str, diff_chunk: str) -> Optional[Dict[str
         "lang": lang,
         "changed_ranges": changed_ranges,
         "nodes": overlapping,
+        "omitted": omitted,
     }
 
 
-__all__ = ["build_diff_ast", "get_new_file_plus_line_ranges"]
+__all__ = ["build_diff_ast", "filter_ast_to_range", "get_new_file_plus_line_ranges"]
 

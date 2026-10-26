@@ -477,6 +477,16 @@ def test_summary_flags_unreviewed_files_instead_of_no_issues():
     assert "`web/App.tsx`" in out
 
 
+def test_summary_shows_reason_per_unreviewed_file():
+    out = _build_structured_summary(
+        [], [], unreviewed=["a.ts", "b.ts"],
+        unreviewed_reasons={"a.ts": "prompt exceeds the model's context window"},
+    )
+    assert "`a.ts` — prompt exceeds the model's context window" in out
+    assert "> - `b.ts`\n" in out or out.rstrip().endswith("`b.ts`")
+    assert "due to LLM provider errors" in out
+
+
 def test_summary_lists_skipped_files_with_reason():
     out = _build_structured_summary([], [], skipped=[("yarn.lock", "generated or vendored")])
     assert "found no issues" not in out
