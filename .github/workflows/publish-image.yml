@@ -1,0 +1,97 @@
+# Build and push the Sift images to GHCR, one Dockerfile target per tag.
+# Each target is built with an explicit --target and checked before push, so the
+# slim tag can never end up holding the full image (Docker's default target).
+name: Publish Image
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [slim, full]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tags
+        id: tags
+        env:
+          TARGET: ${{ matrix.target }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eo pipefail
+          IMAGE="ghcr.io/$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/sift"
+          TAGS="$IMAGE:$TARGET"
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAGS="$TAGS,$IMAGE:$TARGET-$REF_NAME"
+          fi
+          # full is the Dockerfile default target, so it also owns :latest
+          if [ "$TARGET" = "full" ]; then
+            TAGS="$TAGS,$IMAGE:latest"
+          fi
+          echo "local=sift-check:$TARGET" >> "$GITHUB_OUTPUT"
+          echo "push=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "Tags for $TARGET: $TAGS"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.target }} for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          load: true
+          tags: ${{ steps.tags.outputs.local }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+      - name: Verify image matches its target
+        env:
+          TARGET: ${{ matrix.target }}
+          LOCAL: ${{ steps.tags.outputs.local }}
+        run: |
+          set -eo pipefail
+          SIZE_MB=$(( $(docker image inspect "$LOCAL" --format '{{.Size}}') / 1048576 ))
+          echo "$TARGET image size: ${SIZE_MB} MB (uncompressed)"
+          docker run --rm --entrypoint python "$LOCAL" -c "import sift" \
+            || { echo "::error::$TARGET image cannot import sift"; exit 1; }
+          if docker run --rm --entrypoint sh "$LOCAL" -c 'command -v codeql' >/dev/null; then
+            HAS_CODEQL=yes
+          else
+            HAS_CODEQL=no
+          fi
+          echo "codeql present: $HAS_CODEQL"
+          if [ "$TARGET" = "slim" ] && [ "$HAS_CODEQL" = "yes" ]; then
+            echo "::error::slim image contains CodeQL; it was built from the full target"
+            exit 1
+          fi
+          if [ "$TARGET" = "full" ] && [ "$HAS_CODEQL" = "no" ]; then
+            echo "::error::full image is missing CodeQL"
+            exit 1
+          fi
+          echo "✅ $TARGET image matches its target"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same builder and inputs as the verification build, so this reuses its cache
+      - name: Push ${{ matrix.target }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.tags.outputs.push }}
+          cache-from: type=gha,scope=${{ matrix.target }}
