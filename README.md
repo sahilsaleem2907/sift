@@ -38,11 +38,15 @@
 
 ## Docker (GHCR)
 
-Publish or pull an image matching your registry layout. Example image reference (adjust org and tag if yours differ):
+Published images (use one as `SIFT_IMAGE` in the GitHub Actions workflows):
 
-```text
-ghcr.io/sahilsaleem2907/sift:latest
-```
+| Tag | Image |
+|-----|-------|
+| `ghcr.io/sahilsaleem2907/sift:slim` | `slim` target — much smaller, faster to pull in CI |
+| `ghcr.io/sahilsaleem2907/sift:full` / `:latest` | `full` target — includes CodeQL and all linters |
+| `:slim-vX.Y.Z` / `:full-vX.Y.Z` | The same targets pinned to a release |
+
+Images are built and pushed by [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) whenever a `vX.Y.Z` tag is pushed (or on a manual run). Each target is built explicitly and checked before push: `slim` must not contain CodeQL, `full` must.
 
 Build targets in the [Dockerfile](Dockerfile):
 
